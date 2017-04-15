@@ -8,7 +8,7 @@ open Blockexplorer_async
 
 open Util
 
-let main loglevel cfg_file testnet () =
+let lookup loglevel cfg_file testnet () =
   set_level (loglevel_of_int loglevel) ;
   let version =
     Payment_address.(if testnet then Testnet_P2SH else P2SH) in
@@ -37,7 +37,7 @@ let main loglevel cfg_file testnet () =
         Scheduler.yield_until_no_jobs_remain ()
   end
 
-let command =
+let lookup =
   let spec =
     let open Command.Spec in
     empty
@@ -45,6 +45,61 @@ let command =
     +> flag "-cfg" (optional file) ~doc:"filename Configuration file"
     +> flag "-testnet" no_arg ~doc:" Use bitcoin testnet"
   in
-  Command.Staged.async ~summary:"Get utxos from pkhashes" spec main
+  Command.Staged.async
+    ~summary:"Get Bitcoin UTXOs from a Tezos public key hash" spec lookup
+
+let broadcast loglevel cfg_file testnet rawtx () =
+  stage begin fun `Scheduler_started ->
+    broadcast_tx ~testnet (`Hex rawtx) >>| function
+    | Ok (`Hex txid) -> info "%s" txid
+    | Error err -> info "%s" (Http.string_of_error err)
+  end
+
+let broadcast =
+  let spec =
+    let open Command.Spec in
+    empty
+    +> flag "-loglevel" (optional_with_default 1 int) ~doc:"1-3 global loglevel"
+    +> flag "-cfg" (optional file) ~doc:"filename Configuration file"
+    +> flag "-testnet" no_arg ~doc:" Use bitcoin testnet"
+    +> anon ("rawtx" %: string)
+  in
+  Command.Staged.async
+    ~summary:"Broadcast a transaction with blockexplorer.com API"
+    spec broadcast
+
+let fetch loglevel cfg_file testnet txid () =
+  stage begin fun `Scheduler_started ->
+    rawtx ~testnet (`Hex txid) >>| function
+    | Ok t -> begin
+        match Transaction.of_hex t with
+        | None -> error "Unable to decode raw transaction"
+        | Some tx ->
+            let tx_decoded = Format.asprintf "%a" Transaction.pp tx in
+            info "%s" tx_decoded
+      end
+    | Error err -> info "%s" (Http.string_of_error err)
+  end
+
+let fetch =
+  let spec =
+    let open Command.Spec in
+    empty
+    +> flag "-loglevel" (optional_with_default 1 int) ~doc:"1-3 global loglevel"
+    +> flag "-cfg" (optional file) ~doc:"filename Configuration file"
+    +> flag "-testnet" no_arg ~doc:" Use bitcoin testnet"
+    +> anon ("txid" %: string)
+  in
+  Command.Staged.async
+    ~summary:"Fetch a transaction from blockexplorer.com API"
+    spec fetch
+
+let command =
+  Command.group ~summary:"Crowdsale tools" [
+    "fetch-tx", fetch ;
+    "lookup-utxos", lookup ;
+    "broadcast-tx", broadcast ;
+  ]
 
 let () = Command.run command
+
