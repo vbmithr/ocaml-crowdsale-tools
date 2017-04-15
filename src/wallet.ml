@@ -25,7 +25,7 @@ let generate cfg_file testnet seed () =
   let `Hex pkh_hex = Hex.of_string pkh_bytes in
   Out_channel.printf "%s\n" seed_hex ;
   Out_channel.printf "%s\n" pkh_hex ;
-  let pks = List.filter_map cfg.pks ~f:Ec_public.of_base16 in
+  let pks = List.filter_map cfg.pks ~f:(fun pk -> Ec_public.of_hex (`Hex pk)) in
   let script = Script.create_multisig
       ~data:pkh_hex ~threshold:cfg.threshold pks in
   match Payment_address.of_script ~version script with

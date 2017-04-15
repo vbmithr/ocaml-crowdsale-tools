@@ -1,8 +1,8 @@
 (executables
- ((names (wallet utxos_of_pkhashs))
+ ((names (wallet crowdsale))
   (preprocess (pps (ppx_sexp_conv)))
   (libraries (hex sodium libbitcoin blockexplorer.async))))
 
 (install
  ((section bin)
-  (files (wallet.exe utxos_of_pkhashs.exe))))
+  (files (wallet.exe crowdsale.exe))))

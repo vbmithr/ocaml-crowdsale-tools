@@ -16,7 +16,7 @@ let main loglevel cfg_file testnet () =
     Option.value_map cfg_file ~default:Cfg.default ~f:begin fun fn ->
       Sexplib.Sexp.load_sexp_conv_exn fn Cfg.t_of_sexp
     end in
-  let pks = List.filter_map cfg.pks ~f:Ec_public.of_base16 in
+  let pks = List.filter_map cfg.pks ~f:(fun pk -> Ec_public.of_hex (`Hex pk)) in
   stage begin fun `Scheduler_started ->
     let pkhs = Reader.(lines (Lazy.force_val stdin)) in
     let addrs = Pipe.filter_map pkhs ~f:begin fun data ->
