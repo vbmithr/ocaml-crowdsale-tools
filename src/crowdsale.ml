@@ -52,7 +52,7 @@ let broadcast loglevel cfg_file testnet rawtx () =
   stage begin fun `Scheduler_started ->
     broadcast_tx ~testnet (`Hex rawtx) >>| function
     | Ok (`Hex txid) -> info "%s" txid
-    | Error err -> info "%s" (Http.string_of_error err)
+    | Error err -> error "%s" (Http.string_of_error err)
   end
 
 let broadcast =
@@ -71,6 +71,7 @@ let broadcast =
 let fetch loglevel cfg_file testnet txid () =
   stage begin fun `Scheduler_started ->
     rawtx ~testnet (`Hex txid) >>| function
+    | Error err -> error "%s" (Http.string_of_error err)
     | Ok t -> begin
         match Transaction.of_hex t with
         | None -> error "Unable to decode raw transaction"
@@ -78,7 +79,6 @@ let fetch loglevel cfg_file testnet txid () =
             let tx_decoded = Format.asprintf "%a" Transaction.pp tx in
             info "%s" tx_decoded
       end
-    | Error err -> info "%s" (Http.string_of_error err)
   end
 
 let fetch =
@@ -94,8 +94,44 @@ let fetch =
     ~summary:"Fetch a transaction from blockexplorer.com API"
     spec fetch
 
+let decode_tx loglevel rawtx () =
+  set_level (loglevel_of_int loglevel) ;
+  match Transaction.of_hex (`Hex rawtx) with
+  | None -> prerr_endline "Unable to decode"
+  | Some tx -> Format.printf "%a@." Transaction.pp tx
+
+let decode_tx =
+  let spec =
+    let open Command.Spec in
+    empty
+    +> flag "-loglevel" (optional_with_default 1 int) ~doc:"1-3 global loglevel"
+    +> anon ("rawtx" %: string)
+  in
+  Command.basic
+    ~summary:"Decode and print a transaction in raw format"
+    spec decode_tx
+
+let decode_script loglevel rawscript () =
+  set_level (loglevel_of_int loglevel) ;
+  match Script.of_hex (`Hex rawscript) with
+  | None -> prerr_endline "Unable to decode"
+  | Some script -> Format.printf "%a@." Script.pp script
+
+let decode_script =
+  let spec =
+    let open Command.Spec in
+    empty
+    +> flag "-loglevel" (optional_with_default 1 int) ~doc:"1-3 global loglevel"
+    +> anon ("rawscript" %: string)
+  in
+  Command.basic
+    ~summary:"Decode and print a script in raw format"
+    spec decode_script
+
 let command =
   Command.group ~summary:"Crowdsale tools" [
+    "decode-tx", decode_tx ;
+    "decode-script", decode_script ;
     "fetch-tx", fetch ;
     "lookup-utxos", lookup ;
     "broadcast-tx", broadcast ;
