@@ -29,3 +29,14 @@ module Cfg = struct
 end
 
 let loglevel_of_int = function 2 -> `Info | 3 -> `Debug | _ -> `Error
+
+let getpass =
+  let open Ctypes in
+  Foreign.foreign "getpass" (string @-> returning string)
+
+let getpass_confirm () =
+  let passwd = getpass "Enter passphrase: " in
+  let passwd_confirm = getpass "Confirm passphrase: " in
+  if passwd <> passwd_confirm then None else Some (passwd)
+
+let getpass () = getpass "Enter passphrase: "
