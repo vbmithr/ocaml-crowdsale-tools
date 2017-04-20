@@ -145,13 +145,13 @@ let decode_script =
 let spend_n loglevel cfg_file testnet privkey source pkhs () =
   let pkhs = List.map pkhs ~f:Hex.of_string in
   let cfg = cfg_of_cfg_file cfg_file in
-  let input_of_utxo utxo =
-    let prev_out_hash = Hash.Hash32.of_hex_exn (`Hex utxo.Utxo.txid) in
-    let prev_out_index = utxo.vout in
-    match Script.of_hex (`Hex utxo.scriptPubKey) with
-    | None -> invalid_arg "invalid script in source utxo"
-    | Some script ->
-        Transaction.Input.create ~prev_out_hash ~prev_out_index ~script ()
+  let input_and_script_of_utxo utxo = match utxo.Utxo.confirmed with
+    | Unconfirmed _ -> invalid_arg "input_of_utxo: unconfirmed"
+    | Confirmed { vout ; scriptPubKey } ->
+      let prev_out_hash = Hash.Hash32.of_hex_exn (`Hex utxo.Utxo.txid) in
+      let script = Script.invalid () in
+      Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
+      Option.value_exn (Script.of_hex (`Hex scriptPubKey))
   in
   let amount_of_utxos =
     List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount) in
@@ -159,10 +159,9 @@ let spend_n loglevel cfg_file testnet privkey source pkhs () =
     match script_and_payment_addr_of_pkh ~cfg ~testnet pkh with
     | None -> invalid_arg "output_of_pkh"
     | Some (script, _addr) -> Transaction.Output.create ~script ~value in
-  let endorsement_of_input tx secret index input =
+  let endorsement_of_input tx index prev_out_script secret =
     match Transaction.Sign.endorse
-      ~prev_out_script:input.Transaction.Input.script
-      ~tx ~index ~secret () with
+            ~prev_out_script ~tx ~index ~secret () with
     | None -> invalid_arg "endorsement_of_input"
     | Some endorsement -> endorsement in
   set_level (loglevel_of_int loglevel) ;
@@ -172,31 +171,37 @@ let spend_n loglevel cfg_file testnet privkey source pkhs () =
   utxos ~testnet [source] >>| function
   | Error err -> error "%s" (Http.string_of_error err)
   | Ok utxos ->
-      List.iter utxos ~f:begin fun utxo ->
-        debug "%s" (Utxo.to_string utxo)
-      end ;
-      let nb_dests = List.length pkhs in
-      let total_amount = amount_of_utxos utxos in
-      debug "Found %d utxos with total amount %d (%f)"
-        (List.length utxos) total_amount (total_amount // 100_000_000) ;
-      let total_amount_1percent = total_amount / 100 in
-      let total_spendable = total_amount - total_amount_1percent in
-      let amount_per_pkh = Int64.of_int (total_spendable / nb_dests) in
-      let inputs = List.map utxos ~f:input_of_utxo in
-      let outputs = List.map pkhs ~f:(output_of_pkh ~value:amount_per_pkh) in
-      let tx = Transaction.create inputs outputs in
-      let endorsement_scripts = List.mapi inputs ~f:begin fun i input ->
-          let open Transaction.Sign in
-          let Endorsement chunk = endorsement_of_input tx secret i input in
-          Script.endorsement chunk pubkey
-        end in
-      List.iter2_exn inputs endorsement_scripts ~f:begin fun i e ->
-        Transaction.Input.set_script i e
-      end ;
-      Transaction.set_inputs tx inputs ;
-      let `Hex tx_hex = Transaction.to_hex tx in
-      printf "%s" (Transaction.show tx) ;
-      printf "%s" tx_hex
+    let utxos = List.filter utxos ~f:begin fun utxo ->
+        match utxo.Utxo.confirmed with
+        | Utxo.Unconfirmed _ -> false
+        | _ -> true
+      end in
+    List.iter utxos ~f:begin fun utxo ->
+      debug "%s" (Utxo.to_string utxo)
+    end ;
+    let nb_dests = List.length pkhs in
+    let total_amount = amount_of_utxos utxos in
+    debug "Found %d utxos with total amount %d (%f)"
+      (List.length utxos) total_amount (total_amount // 100_000_000) ;
+    let total_amount_1percent = total_amount / 100 in
+    let total_spendable = total_amount - total_amount_1percent in
+    let amount_per_pkh = Int64.of_int (total_spendable / nb_dests) in
+    let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
+    let inputs = List.map inputs_and_scripts ~f:fst in
+    let outputs = List.map pkhs ~f:(output_of_pkh ~value:amount_per_pkh) in
+    let tx = Transaction.create inputs outputs in
+    let endorsement_scripts = List.mapi inputs_and_scripts ~f:begin fun i (input, script) ->
+        let open Transaction.Sign in
+        let Endorsement chunk = endorsement_of_input tx i script secret in
+        Script.endorsement chunk pubkey
+      end in
+    List.iter2_exn inputs endorsement_scripts ~f:begin fun i e ->
+      Transaction.Input.set_script i e
+    end ;
+    Transaction.set_inputs tx inputs ;
+    let `Hex tx_hex = Transaction.to_hex tx in
+    printf "%s" (Transaction.show tx) ;
+    printf "%s" tx_hex
 
 let spend_n =
   let spec =
