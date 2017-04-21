@@ -152,8 +152,7 @@ let spend_n loglevel cfg testnet privkey source dest_addrs =
       let total_amount = amount_of_utxos utxos in
       Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
         (List.length utxos) total_amount (total_amount // 100_000_000) ;
-      let total_amount_1percent = total_amount / 100 in
-      let total_spendable = total_amount - total_amount_1percent in
+      let total_spendable = total_amount - 100_000 in
       let amount_per_addr = Int64.of_int (total_spendable / nb_dests) in
       let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
       let inputs = List.map inputs_and_scripts ~f:fst in
