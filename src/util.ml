@@ -58,6 +58,10 @@ module Cmdliner = struct
     let doc = "Use Bitcoin testnet." in
     Arg.(value & flag & info ["t" ; "testnet"] ~doc)
 
+  let json =
+    let doc = "Output in JSON format." in
+    Arg.(value & flag & info ["j" ; "json"] ~doc)
+
   module Conv = struct
     open Caml.Format
     let hex =
