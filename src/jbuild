@@ -1,7 +1,7 @@
 (executables
  ((names (wallet crowdsale))
   (preprocess (pps (ppx_sexp_conv)))
-  (libraries (hex sodium libbitcoin blockexplorer.async))))
+  (libraries (base stdio cmdliner hex sodium libbitcoin blockexplorer.lwt))))
 
 (install
  ((section bin)

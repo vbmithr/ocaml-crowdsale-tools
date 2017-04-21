@@ -1,4 +1,5 @@
 open Sexplib.Std
+open Libbitcoin
 
 module Cfg = struct
   type t = {
@@ -28,7 +29,53 @@ module Cfg = struct
   }
 end
 
-let loglevel_of_int = function 2 -> `Info | 3 -> `Debug | _ -> `Error
+let set_loglevel vs =
+  let level = match List.length vs with
+    | 0 -> Lwt_log.Notice
+    | 1 -> Info
+    | _ -> Debug in
+  Lwt_log.add_rule "*" level
+
+module Cmdliner = struct
+  open Cmdliner
+  let cfg =
+    let cfg_conv =
+      let of_file fn =
+        match Sexplib.Sexp.load_sexp_conv fn Cfg.t_of_sexp with
+        | `Result cfg -> `Ok cfg
+        | `Error _ -> `Error "cfg_of_file" in
+      let pp ppf cfg =
+        Sexplib.Sexp.pp_hum ppf (Cfg.sexp_of_t cfg) in
+      of_file, pp in
+    let doc = "Configuration file to use." in
+    Arg.(value & opt cfg_conv Cfg.default & info ["c" ; "cfg"] ~doc)
+
+  let loglevel =
+    let doc = "Print more debug messages. Can be repeated." in
+    Arg.(value & flag_all & info ["v"] ~doc)
+
+  let testnet =
+    let doc = "Use Bitcoin testnet." in
+    Arg.(value & flag & info ["t" ; "testnet"] ~doc)
+
+  module Conv = struct
+    open Caml.Format
+    let hex =
+      (fun str ->
+         try `Ok (Hex.to_string (`Hex str))
+         with _ ->`Error (sprintf "Hex expected, got %s" str)),
+      (fun ppf hex ->
+         let `Hex hex_str = Hex.of_string hex in
+         fprintf ppf "%s" hex_str)
+
+    let payment_addr =
+      (fun str ->
+         match Payment_address.of_b58check str with
+         | Some addr -> `Ok addr
+         | None -> `Error (sprintf "Payment address expected, got %s" str)),
+      Payment_address.pp
+  end
+end
 
 let getpass =
   let open Ctypes in

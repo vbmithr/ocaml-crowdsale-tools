@@ -1,8 +1,12 @@
-open Core
+open Base
+open Stdio
+open Cmdliner
 open Sodium
+
 open Libbitcoin
 
 open Util
+open Util.Cmdliner
 
 let tezos_pkh_size = 20
 
@@ -26,68 +30,56 @@ let generate_seed cfg version seed_bytes =
 let generate_one cfg version passphrase =
   let entropy = Random.Bytes.generate 20 in
   let words = Mnemonic.of_entropy entropy in
-  Out_channel.printf "%s\n" (String.concat ~sep:" " words);
-  let seed_bytes = String.subo ~len:32 @@
-    Option.value_exn (Mnemonic.to_seed words ~passphrase) in
+  printf "%s\n" (String.concat ~sep:" " words);
+  let seed_bytes = String.subo ~len:32
+      (Option.value_exn (Mnemonic.to_seed words ~passphrase)) in
   generate_seed cfg version seed_bytes
 
-let generate cfg_file testnet n () =
+let generate cfg testnet n =
   let version =
     Payment_address.(if testnet then Testnet_P2SH else P2SH) in
-  let cfg =
-    Option.value_map cfg_file ~default:Cfg.default ~f:begin fun fn ->
-      Sexplib.Sexp.load_sexp_conv_exn fn Cfg.t_of_sexp
-    end in
   match getpass_confirm () with
   | None ->
       prerr_endline "Passphrase do not match. Aborting." ;
-      exit 1
+      Caml.exit 1
   | Some passphrase ->
       Random.stir () ;
       for i = 0 to n - 1 do
         generate_one cfg version passphrase
       done
 
-let check cfg_file testnet words () =
+let check cfg testnet words =
   let version =
     Payment_address.(if testnet then Testnet_P2SH else P2SH) in
-  let cfg =
-    Option.value_map cfg_file ~default:Cfg.default ~f:begin fun fn ->
-      Sexplib.Sexp.load_sexp_conv_exn fn Cfg.t_of_sexp
-    end in
   let passphrase = getpass () in
   match Mnemonic.to_seed ~passphrase words with
   | None ->
       prerr_endline "Provided mnemonic is invalid" ;
-      exit 1
+      Caml.exit 1
   | Some seed_bytes ->
       Out_channel.printf "%s\n" (String.concat ~sep:" " words);
       generate_seed cfg version (String.subo ~len:32 seed_bytes)
 
 let generate =
-  let spec =
-    let open Command.Spec in
-    empty
-    +> flag "-cfg" (optional file) ~doc:"filename Configuration file"
-    +> flag "-testnet" no_arg ~doc:" Use bitcoin testnet"
-    +> anon (maybe_with_default 1 ("number" %: int))
-  in
-  Command.basic ~summary:"Generate a Tezos wallet" spec generate
+  let doc = "Generate a Tezos wallet." in
+  let n = Arg.(value & (pos 0 int 1) & info [] ~docv:"N") in
+  Term.(const generate $ cfg $ testnet $ n),
+  Term.info ~doc "generate"
 
 let check =
-  let spec =
-    let open Command.Spec in
-    empty
-    +> flag "-cfg" (optional file) ~doc:"filename Configuration file"
-    +> flag "-testnet" no_arg ~doc:" Use bitcoin testnet"
-    +> anon (sequence ("word" %: string))
-  in
-  Command.basic ~summary:"Check a Tezos wallet" spec check
+  let doc = "Check a Tezos wallet." in
+  let words =
+    Arg.(value & (pos_all string []) & info [] ~docv:"WORDS") in
+  Term.(const check $ cfg $ testnet $ words),
+  Term.info ~doc "check"
 
-let command =
-  Command.group ~summary:"Create a Tezos wallet" [
-    "generate", generate;
-    "check", check;
-  ]
+let default_cmd =
+  let doc = "Wallet operations." in
+  Term.(ret (const (`Help (`Pager, None)))),
+  Term.info ~doc "wallet"
 
-let () = Command.run command
+let cmds = [ generate ; check ]
+
+let () = match Term.eval_choice default_cmd cmds with
+  | `Error _ -> Caml.exit 1
+  | #Term.result -> Caml.exit 0
