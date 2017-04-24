@@ -14,17 +14,17 @@ module Wallet = struct
   type t = {
     mnemonic : string list ;
     pkh : Hex.t ;
-    addr : Payment_address.t ;
+    addr : Base58.t ;
   }
 
   let encoding =
     let open Json_encoding in
     conv
-      (fun { mnemonic ; pkh = `Hex pkh_hex ; addr } ->
-         (mnemonic, pkh_hex, Payment_address.to_b58check addr))
+      (fun { mnemonic ; pkh = `Hex pkh_hex ; addr = `Base58 addr_base58 } ->
+         (mnemonic, pkh_hex, addr_base58))
       (fun (mnemonic, pkh, addr) ->
          { mnemonic ; pkh = `Hex pkh ;
-           addr = Payment_address.of_b58check_exn addr })
+           addr = Base58.of_string_exn addr })
       (obj3
          (req "mnemonic" (list string))
          (req "pkh" string)
@@ -39,7 +39,7 @@ module Wallet = struct
         ~pp_sep:(fun fmt () -> fprintf fmt " ")
         pp_print_string in
     fprintf ppf "%a@.%s@.%a"
-      pp_mnemonic mnemonic pkh_str Payment_address.pp addr
+      pp_mnemonic mnemonic pkh_str Base58.pp addr
 
   let show t =
     Caml.Format.asprintf "%a" pp t
@@ -53,13 +53,13 @@ let generate_seed cfg version seed_bytes =
   Generichash.Bytes.update h pk_bytes ;
   let pkh = Generichash.final h in
   let pkh_bytes = Generichash.Bytes.of_hash pkh in
-  let pks =
-    List.filter_map cfg.Cfg.pks ~f:(fun pk -> Ec_public.of_hex (`Hex pk)) in
-  let script = Script.create_multisig
-      ~data:pkh_bytes ~threshold:cfg.threshold pks in
+  let script = Script.P2SH_multisig.redeem
+      ~append_data:pkh_bytes ~threshold:cfg.Cfg.threshold cfg.pks in
   match Payment_address.of_script ~version script with
   | None -> failwith "generate_seed"
-  | Some addr -> (Hex.of_string pkh_bytes), addr
+  | Some addr ->
+    (Hex.of_string pkh_bytes),
+    Payment_address.to_b58check addr
 
 let generate_one cfg version passphrase =
   let entropy = Random.Bytes.generate 20 in
