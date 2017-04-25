@@ -67,6 +67,10 @@ opam install \
      stdio \
      cmdliner \
      sodium \
+     lwt \
+     cohttp \
+     zarith \
+     nocrypto
  || exit 2
 opam pin add configurator git@github.com:janestreet/configurator.git --yes \
  || exit 2
