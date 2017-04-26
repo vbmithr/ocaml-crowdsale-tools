@@ -10,6 +10,9 @@ open Util.Cmdliner
 
 let tezos_pkh_size = 20
 
+type loglevel = [`Error | `Info | `Debug]
+let loglevel = ref (`Error :> loglevel)
+
 module Wallet = struct
   type t = {
     mnemonic : string list ;
@@ -55,6 +58,11 @@ let generate_seed cfg version seed_bytes =
   let pkh_bytes = Generichash.Bytes.of_hash pkh in
   let script = Script.P2SH_multisig.redeem
       ~append_data:pkh_bytes ~threshold:cfg.Cfg.threshold cfg.pks in
+  let `Hex script_hex = Hex.of_string (Script.to_bytes script) in
+  begin match !loglevel with
+  | `Debug -> Stdio.eprintf "%s\n" script_hex ;
+  | #loglevel -> ()
+  end ;
   match Payment_address.of_script ~version script with
   | None -> failwith "generate_seed"
   | Some addr ->
@@ -76,7 +84,12 @@ let generate_n cfg version passphrase n =
     else acc
   in inner [] n
 
-let generate cfg testnet json_out n =
+let generate cfg ll testnet json_out n =
+  begin match List.length ll with
+    | 1 -> loglevel := `Info
+    | 2 -> loglevel := `Debug
+    | _ -> loglevel := `Error
+  end ;
   let version =
     Payment_address.(if testnet then Testnet_P2SH else P2SH) in
   match getpass_confirm () with
@@ -107,7 +120,7 @@ let check cfg testnet mnemonic =
 let generate =
   let doc = "Generate a Tezos wallet." in
   let n = Arg.(value & (pos 0 int 1) & info [] ~docv:"N") in
-  Term.(const generate $ cfg $ testnet $ json $ n),
+  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ n),
   Term.info ~doc "generate"
 
 let check =
