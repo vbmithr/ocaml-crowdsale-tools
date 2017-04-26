@@ -56,8 +56,11 @@ let generate_seed cfg version seed_bytes =
   Generichash.Bytes.update h pk_bytes ;
   let pkh = Generichash.final h in
   let pkh_bytes = Generichash.Bytes.of_hash pkh in
-  let script = Script.P2SH_multisig.redeem
-      ~append_data:pkh_bytes ~threshold:cfg.Cfg.threshold cfg.pks in
+  let script =
+    Script.P2SH_multisig.scriptRedeem
+      ~append_script:Script.Script.Opcode.[Data pkh_bytes ; Drop]
+      ~threshold:cfg.Cfg.threshold cfg.pks in
+  let script = Script.of_script script in
   let `Hex script_hex = Hex.of_string (Script.to_bytes script) in
   begin match !loglevel with
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;

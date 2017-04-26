@@ -11,14 +11,16 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let script_and_payment_addr_of_pkh ~cfg ~testnet pkh =
-  let script =
-    Script.P2SH_multisig.redeem ~append_data:pkh ~threshold:cfg.Cfg.threshold cfg.pks in
+let payment_addr_of_pkh ~cfg ~testnet pkh =
+  let scriptRedeem =
+    Script.P2SH_multisig.scriptRedeem
+      ~append_script:Script.Script.Opcode.[Data pkh ; Drop]
+      ~threshold:cfg.Cfg.threshold cfg.pks in
   let version =
     Payment_address.(if testnet then Testnet_P2SH else P2SH) in
-  let payment_address = Payment_address.of_script ~version script in
-  Option.map payment_address
-    ~f:(fun addr -> script, Payment_address.to_b58check addr)
+  let payment_address =
+    Payment_address.of_script ~version (Script.of_script scriptRedeem) in
+  Option.map payment_address ~f:Payment_address.to_b58check
 
 let lookup_utxos loglevel cfg testnet pkhs =
   set_loglevel loglevel ;
@@ -27,11 +29,11 @@ let lookup_utxos loglevel cfg testnet pkhs =
   let run () =
     Lwt_log.debug_f "Found %d pkhs" (List.length pkhs) >>= fun () ->
     let addrs = List.filter_map pkhs
-        ~f:(fun pkh -> script_and_payment_addr_of_pkh ~cfg ~testnet pkh) in
-    List.iter2_exn pkhs addrs ~f:begin fun pkh (_script, (`Base58 addr)) ->
+        ~f:(fun pkh -> payment_addr_of_pkh ~cfg ~testnet pkh) in
+    List.iter2_exn pkhs addrs ~f:begin fun pkh (`Base58 addr) ->
       Lwt_log.ign_debug_f "%s -> %s" pkh addr
     end ;
-    utxos ~testnet (List.map addrs ~f:snd) >>= function
+    utxos ~testnet addrs >>= function
     | Error err ->
       Lwt_log.error (Http.string_of_error err)
     | Ok utxos ->
@@ -166,7 +168,7 @@ let spend_n loglevel cfg testnet privkey source dest_addrs amount fees =
       let scriptSigs =
         List.mapi inputs_and_scripts ~f:begin fun i (input, script) ->
           let open Transaction.Sign in
-          let Endorsement chunk = endorsement_of_input tx i script secret in
+          let chunk = endorsement_of_input tx i script secret in
           Script.P2PKH.scriptSig chunk pubkey
         end in
       List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
@@ -243,7 +245,7 @@ let spend_multisig loglevel cfg testnet privkey source dest =
       let scriptSigs =
         List.mapi inputs_and_scripts ~f:begin fun i (input, script) ->
           let open Transaction.Sign in
-          let Endorsement chunk = endorsement_of_input tx i script secret in
+          let chunk = endorsement_of_input tx i script secret in
           Script.P2PKH.scriptSig chunk pubkey
         end in
       List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
