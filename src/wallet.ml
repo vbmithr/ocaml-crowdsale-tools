@@ -11,7 +11,7 @@ open Util.Cmdliner
 let tezos_pkh_size = 20
 
 type loglevel = [`Error | `Info | `Debug]
-let loglevel = ref (`Error :> loglevel)
+let loglevel = ref (`Error : loglevel)
 
 module Wallet = struct
   type t = {
@@ -87,7 +87,7 @@ let generate_n cfg version passphrase n =
     else acc
   in inner [] n
 
-let generate cfg ll testnet json_out n =
+let generate cfg ll testnet json_out only_pkhs n =
   begin match List.length ll with
     | 1 -> loglevel := `Info
     | 2 -> loglevel := `Debug
@@ -102,10 +102,14 @@ let generate cfg ll testnet json_out n =
   | Some passphrase ->
       Random.stir () ;
       let wallets = generate_n cfg version passphrase n in
-      if json_out then
+      match json_out, only_pkhs with
+      | true, _ ->
         let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
         Out_channel.printf "%s\n" ret
-      else
+      | _, true ->
+        List.iter wallets
+          ~f:(fun { pkh = `Hex pkh_hex } -> Out_channel.printf "%s\n" pkh_hex)
+      | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check cfg testnet mnemonic =
@@ -122,8 +126,11 @@ let check cfg testnet mnemonic =
 
 let generate =
   let doc = "Generate a Tezos wallet." in
+  let only_pkhs =
+    let doc = "Output only pkhs." in
+    Arg.(value & flag & info ["only-pkhs"] ~doc) in
   let n = Arg.(value & (pos 0 int 1) & info [] ~docv:"N") in
-  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ n),
+  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ only_pkhs $ n),
   Term.info ~doc "generate"
 
 let check =

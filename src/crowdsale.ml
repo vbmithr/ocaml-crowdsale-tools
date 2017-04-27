@@ -1,5 +1,6 @@
 open Base
 open Stdio
+open Rresult
 open Cmdliner
 open Lwt.Infix
 
@@ -122,138 +123,170 @@ let input_and_script_of_utxo utxo = match utxo.Utxo.confirmed with
     Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
     Option.value_exn (Script.of_hex (`Hex scriptPubKey))
 
-let spend_n loglevel cfg testnet privkey source dest_addrs amount fees =
-  set_loglevel loglevel ;
-  let amount_of_utxos =
-    List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount) in
-  let output_of_dest_addr addr ~value =
-    let script = Payment_address.to_script addr in
-    Transaction.Output.create ~script ~value in
-  let dest_addrs = List.map dest_addrs ~f:Payment_address.of_b58check_exn in
+let amount_of_utxos =
+  List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount)
+
+let output_of_dest_addr addr ~value =
+  let script = Payment_address.to_script addr in
+  Transaction.Output.create ~script ~value
+
+let spend_n cfg testnet privkey source pkhs amount =
+  let dest_addrs = List.map pkhs
+      ~f:(Fn.compose snd (script_and_payment_addr_of_pkh ~cfg ~testnet)) in
   let privkey = Ec_private.of_wif_exn privkey in
   let pubkey = Ec_public.of_private privkey in
   let secret = Ec_private.secret privkey in
-  let run () =
-    utxos ~testnet [source] >>= function
-    | Error err -> Lwt_log.error (Http.string_of_error err)
-    | Ok utxos ->
-      let utxos = List.filter utxos ~f:begin fun utxo ->
-          match utxo.Utxo.confirmed with
-          | Utxo.Unconfirmed _ -> false
-          | _ -> true
-        end in
-      List.iter utxos ~f:begin fun utxo ->
-        Lwt_log.ign_debug (Utxo.to_string utxo)
-      end ;
-      let nb_dests = List.length dest_addrs in
-      let amount_found = amount_of_utxos utxos in
-      let total_amount = Option.value ~default:amount_found amount in
-      Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
-        (List.length utxos) amount_found (amount_found // 100_000_000) ;
-      let fees = Option.value ~default:100_000 fees in
-      let change = amount_found - total_amount - fees in
-      let amount_per_addr = Int64.of_int ((total_amount - fees) / nb_dests) in
-      let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
-      let inputs = List.map inputs_and_scripts ~f:fst in
-      let change_out =
-        output_of_dest_addr (Payment_address.of_b58check_exn source)
-          ~value:(Int64.of_int change) in
-      let outputs =
-        change_out :: List.map dest_addrs ~f:(output_of_dest_addr ~value:amount_per_addr) in
-      let tx = Transaction.create inputs outputs in
-      let scriptSigs =
-        List.mapi inputs_and_scripts ~f:begin fun index (_input, prev_out_script) ->
-          let open Transaction.Sign in
-          let endorsement =
-            Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret () in
-          Script.P2PKH.scriptSig endorsement pubkey
-        end in
-      List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
-        Transaction.Input.set_script i e
-      end ;
-      Transaction.set_inputs tx inputs ;
-      let `Hex tx_hex = Transaction.to_hex tx in
-      printf "%s\n" (Transaction.show tx) ;
-      printf "%s\n" tx_hex ;
-      Lwt.return_unit in
-  Lwt_main.run (run ())
+  utxos ~testnet [source] >|=
+  R.map begin fun utxos ->
+    let utxos = List.filter utxos ~f:begin fun utxo ->
+        match utxo.Utxo.confirmed with
+        | Utxo.Unconfirmed _ -> false
+        | _ -> true
+      end in
+    List.iter utxos ~f:begin fun utxo ->
+      Lwt_log.ign_debug (Utxo.to_string utxo)
+    end ;
+
+    (* Build transaction *)
+
+    let nb_dests = List.length dest_addrs in
+    let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
+    let inputs = List.map inputs_and_scripts ~f:fst in
+    let change_out =
+      output_of_dest_addr (Payment_address.of_b58check_exn source) ~value:0L in
+    let outputs =
+      change_out :: List.map dest_addrs ~f:(output_of_dest_addr ~value:0L) in
+    let tx = Transaction.create inputs outputs in
+
+    (* Compute fees *)
+
+    let size = Transaction.serialized_size tx in
+    let fees_per_byte = if testnet then cfg.fees_testnet else cfg.fees in
+    let fees = size * fees_per_byte in
+    let amount_found = amount_of_utxos utxos in
+    Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
+      (List.length utxos) amount_found (amount_found // 100_000_000) ;
+    let total_amount = Option.value ~default:amount_found amount in
+    let total_amount = Int.min amount_found total_amount in
+    let change = amount_found - total_amount in
+    let spendable_amount = total_amount - fees in
+    let amount_per_addr = spendable_amount / nb_dests in
+
+    Lwt_log.ign_debug_f "change = %d, spendable = %d, amount_per_addr = %d"
+      change spendable_amount amount_per_addr ;
+
+    List.iteri outputs ~f:begin fun i o ->
+      let v = if i = 0 then change else amount_per_addr in
+      Transaction.Output.set_value o (Int64.of_int v)
+    end ;
+
+    (* Sign transaction *)
+
+    let scriptSigs =
+      List.mapi inputs_and_scripts ~f:begin fun index (_input, prev_out_script) ->
+        let open Transaction.Sign in
+        let endorsement =
+          Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret () in
+        Script.P2PKH.scriptSig endorsement pubkey
+      end in
+    List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
+      Transaction.Input.set_script i e
+    end ;
+    Transaction.set_inputs tx inputs ;
+    Transaction.set_outputs tx outputs ;
+    let `Hex tx_hex = Transaction.to_hex tx in
+    printf "%s\n" (Transaction.show tx) ;
+    printf "%s\n" tx_hex
+  end
+
+let spend_n loglevel cfg testnet privkey source pkhs amount =
+  set_loglevel loglevel ;
+  let pkhs = match pkhs with
+    | [] -> List.map Stdio.In_channel.(input_lines stdin)
+              ~f:(fun s -> Hex.to_string (`Hex s))
+    | _ -> pkhs in
+  Lwt_main.run begin
+    spend_n cfg testnet privkey source pkhs amount >|= function
+    | Ok () -> ()
+    | Error err -> Lwt_log.ign_error (Http.string_of_error err)
+  end
 
 let spend_n =
   let amount =
     let doc = "Total amount to spend." in
     Arg.(value & opt (some int) None & info ["a" ; "amount"] ~doc) in
-  let fees =
-    let doc = "Fees for the transaction." in
-    Arg.(value & opt (some int) None & info ["f" ; "fees"] ~doc) in
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
   let source =
     Arg.(required & (pos 1 (some Conv.payment_addr) None) & info [] ~docv:"SOURCE") in
-  let dests =
-    Arg.(non_empty & (pos_right 1 Conv.payment_addr []) & info [] ~docv:"DEST") in
+  let pkhs =
+    Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
-  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ source $ dests $ amount $ fees),
+  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ source $ pkhs $ amount),
   Term.info ~doc "spend-n"
 
-let spend_multisig loglevel cfg testnet (sk1, sk2) pkh dest =
-  let scriptRedeem, source = script_and_payment_addr_of_pkh ~cfg ~testnet pkh in
-  set_loglevel loglevel ;
-  let amount_of_utxos =
-    List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount) in
-  let output_of_dest_addr addr ~value =
-    let script = Payment_address.to_script addr in
-    Transaction.Output.create ~script ~value in
+let amount_scriptRedeem_and_inputs_of_pkh ~cfg ~testnet pkh =
+  let scriptRedeem, payment_addr = script_and_payment_addr_of_pkh ~cfg ~testnet pkh in
+  let addr_b58 = Payment_address.to_b58check payment_addr in
+  utxos ~testnet [addr_b58] >|=
+  R.map begin fun utxos ->
+    let amount = amount_of_utxos utxos in
+    amount, scriptRedeem, List.map utxos ~f:(Fn.compose fst input_and_script_of_utxo)
+  end
+
+let spend_multisig cfg testnet pkhs dest =
   let dest = Payment_address.of_b58check_exn dest in
-  let sk1, sk2 = Ec_private.(of_wif_exn sk1, of_wif_exn sk2) in
+  let sk1, sk2 = match cfg.Cfg.sks with
+    | sk1 :: sk2 :: _ -> sk1, sk2
+    | _ -> failwith "Not enough sks" in
   let secret1, secret2 = Ec_private.(secret sk1, secret sk2) in
-  let run () =
-    utxos ~testnet [Payment_address.to_b58check source] >>= function
-    | Error err -> Lwt_log.error (Http.string_of_error err)
-    | Ok utxos ->
-      let utxos = List.filter utxos ~f:begin fun utxo ->
-          match utxo.Utxo.confirmed with
-          | Utxo.Unconfirmed _ -> false
-          | _ -> true
-        end in
-      List.iter utxos ~f:begin fun utxo ->
-        Lwt_log.ign_debug (Utxo.to_string utxo)
-      end ;
-      let total_amount = amount_of_utxos utxos in
-      Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
-        (List.length utxos) total_amount (total_amount // 100_000_000) ;
-      let total_spendable = Int64.of_int (total_amount - 100_000) in
-      let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
-      let inputs = List.map inputs_and_scripts ~f:fst in
-      let output = output_of_dest_addr dest ~value:total_spendable in
-      let tx = Transaction.create inputs [output] in
-      let scriptSigs =
-        List.mapi inputs_and_scripts ~f:begin fun index (input, prev_out_script) ->
-          let open Transaction.Sign in
-          let ed1 =
-            Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
-          let ed2 =
-            Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret2 () in
-          Script.P2SH_multisig.scriptSig ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem
-        end in
-      List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
-        Transaction.Input.set_script i e
-      end ;
-      Transaction.set_inputs tx inputs ;
-      let `Hex tx_hex = Transaction.to_hex tx in
-      printf "%s\n" (Transaction.show tx) ;
-      printf "%s\n" tx_hex ;
-      Lwt.return_unit in
-  Lwt_main.run (run ())
+  Lwt_list.filter_map_s begin fun pkh ->
+    amount_scriptRedeem_and_inputs_of_pkh ~cfg ~testnet pkh >|= R.to_option
+  end pkhs >|= fun amounts_scripts_and_inputs ->
+  let amounts, scriptRedeems, inputs = List.unzip3 amounts_scripts_and_inputs in
+  let total_amount =
+    List.fold_left amounts_scripts_and_inputs ~init:0 ~f:(fun acc (a,_,_) -> acc + a) in
+  Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
+    (List.length amounts_scripts_and_inputs) total_amount (total_amount // 100_000_000) ;
+  let output = output_of_dest_addr dest ~value:0L in
+  let tx = Transaction.create (List.concat inputs) [output] in
+  let fees_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
+  let tx_size = Transaction.serialized_size tx in
+  let spendable_amount = total_amount - tx_size * fees_per_byte in
+  let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
+  Transaction.set_outputs tx [output] ;
+  let scriptSigs =
+    List.mapi amounts_scripts_and_inputs ~f:begin fun index (amount, scriptRedeem, input) ->
+      let open Transaction.Sign in
+      let prev_out_script = Script.of_script scriptRedeem in
+      let ed1 =
+        Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
+      let ed2 =
+        Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret2 () in
+      Script.P2SH_multisig.scriptSig ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem
+    end in
+  List.iter2_exn inputs scriptSigs ~f:begin fun inputs scriptSig ->
+    List.iter inputs ~f:(fun input -> Transaction.Input.set_script input scriptSig)
+  end ;
+  Transaction.set_inputs tx (List.concat inputs) ;
+  tx
+
+let spend_multisig loglevel cfg testnet pkhs dest =
+  set_loglevel loglevel ;
+  Lwt_main.run begin
+    spend_multisig cfg testnet pkhs dest >|= fun tx ->
+    let `Hex tx_hex = Transaction.to_hex tx in
+    printf "%s\n" (Transaction.show tx) ;
+    printf "%s\n" tx_hex
+  end
 
 let spend_multisig =
   let doc = "Spend bitcoins from a multisig address." in
-  let privkey =
-    Arg.(required & (pos 0 (some (t2 string string)) None) & info [] ~docv:"SECRETKEYS") in
-  let source =
-    Arg.(required & (pos 1 (some Conv.hex) None) & info [] ~docv:"PKH") in
+  let pkhs =
+    Arg.(required & (pos 0 (some (list Conv.hex)) None) & info [] ~docv:"PKH") in
   let dest =
-    Arg.(required & (pos 2 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
-  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ privkey $ source $ dest),
+    Arg.(required & (pos 1 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
+  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ pkhs $ dest),
   Term.info ~doc "spend-multisig"
 
 let default_cmd =

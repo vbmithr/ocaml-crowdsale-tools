@@ -9,6 +9,8 @@ module Cfg = struct
     addrs : Payment_address.t list ;
     addrs_testnet: Payment_address.t list ;
     threshold : int ;
+    fees : int ;
+    fees_testnet : int ;
   }
 
   let of_sks ?(version=Ec_private.Mainnet) sks =
@@ -18,7 +20,8 @@ module Cfg = struct
       List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
     let addrs_testnet =
       List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-    { version ; sks ; pks ; addrs ; addrs_testnet ; threshold = 2 }
+    { version ; sks ; pks ; addrs ; addrs_testnet ;
+      threshold = 2 ; fees = 200 ; fees_testnet = 100 }
 
   let default = of_sks ~version:Testnet [
       "cPUDdQmiqjMVcPWxn2zJxV2Kdm8G5fbkXyNh9Xd4qfhq6gVtbFCd" ;
@@ -35,8 +38,8 @@ module Cfg = struct
   let encoding =
     let open Json_encoding in
     conv
-      (fun _ -> (Ec_private.Mainnet, [], [], 0))
-      begin fun (version, sks, pks, threshold) ->
+      (fun _ -> (Ec_private.Mainnet, [], [], 0, 0, 0))
+      begin fun (version, sks, pks, threshold, fees, fees_testnet) ->
         if List.length sks > 0 then begin
           let sks = List.map sks ~f:(Ec_private.of_wif_exn ~version) in
           let pks = List.map sks ~f:Ec_public.of_private in
@@ -44,7 +47,7 @@ module Cfg = struct
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { version ; sks ; pks ; addrs ; addrs_testnet ; threshold }
+          { version ; sks ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end
         else begin
           let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
@@ -52,13 +55,15 @@ module Cfg = struct
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { version ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold }
+          { version ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end end
-      (obj4
+      (obj6
          (dft "version" version_encoding Ec_private.Mainnet)
          (dft "sks" (list string) [])
          (dft "pks" (list string) [])
-         (req "threshold" int))
+         (req "threshold" int)
+         (dft "fees" int 200)
+         (dft "fees_testnet" int 100))
 
   let of_file fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in
