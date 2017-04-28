@@ -130,13 +130,17 @@ let output_of_dest_addr addr ~value =
   let script = Payment_address.to_script addr in
   Transaction.Output.create ~script ~value
 
-let spend_n cfg testnet privkey source pkhs amount =
+let spend_n cfg testnet privkey pkhs amount =
   let dest_addrs = List.map pkhs
       ~f:(Fn.compose snd (script_and_payment_addr_of_pkh ~cfg ~testnet)) in
   let privkey = Ec_private.of_wif_exn privkey in
   let pubkey = Ec_public.of_private privkey in
   let secret = Ec_private.secret privkey in
-  utxos ~testnet [source] >|=
+  let version =
+    if testnet then Payment_address.Testnet_P2PKH else P2PKH in
+  let source = Payment_address.of_point ~version pubkey in
+  let source_b58 = Payment_address.to_b58check source in
+  utxos ~testnet [source_b58] >|=
   R.map begin fun utxos ->
     let utxos = List.filter utxos ~f:begin fun utxo ->
         match utxo.Utxo.confirmed with
@@ -153,7 +157,7 @@ let spend_n cfg testnet privkey source pkhs amount =
     let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
     let inputs = List.map inputs_and_scripts ~f:fst in
     let change_out =
-      output_of_dest_addr (Payment_address.of_b58check_exn source) ~value:0L in
+      output_of_dest_addr source ~value:0L in
     let outputs =
       change_out :: List.map dest_addrs ~f:(output_of_dest_addr ~value:0L) in
     let tx = Transaction.create inputs outputs in
@@ -179,6 +183,7 @@ let spend_n cfg testnet privkey source pkhs amount =
       let v = if i = 0 then change else amount_per_addr in
       Transaction.Output.set_value o (Int64.of_int v)
     end ;
+    Transaction.set_outputs tx outputs ;
 
     (* Sign transaction *)
 
@@ -193,20 +198,19 @@ let spend_n cfg testnet privkey source pkhs amount =
       Transaction.Input.set_script i e
     end ;
     Transaction.set_inputs tx inputs ;
-    Transaction.set_outputs tx outputs ;
     let `Hex tx_hex = Transaction.to_hex tx in
     printf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
   end
 
-let spend_n loglevel cfg testnet privkey source pkhs amount =
+let spend_n loglevel cfg testnet privkey pkhs amount =
   set_loglevel loglevel ;
   let pkhs = match pkhs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
               ~f:(fun s -> Hex.to_string (`Hex s))
     | _ -> pkhs in
   Lwt_main.run begin
-    spend_n cfg testnet privkey source pkhs amount >|= function
+    spend_n cfg testnet privkey pkhs amount >|= function
     | Ok () -> ()
     | Error err -> Lwt_log.ign_error (Http.string_of_error err)
   end
@@ -217,12 +221,10 @@ let spend_n =
     Arg.(value & opt (some int) None & info ["a" ; "amount"] ~doc) in
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
-  let source =
-    Arg.(required & (pos 1 (some Conv.payment_addr) None) & info [] ~docv:"SOURCE") in
   let pkhs =
     Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
-  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ source $ pkhs $ amount),
+  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ pkhs $ amount),
   Term.info ~doc "spend-n"
 
 let amount_scriptRedeem_and_inputs_of_pkh ~cfg ~testnet pkh =
