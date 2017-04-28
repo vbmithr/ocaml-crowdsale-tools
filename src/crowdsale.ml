@@ -275,6 +275,10 @@ let spend_multisig cfg testnet pkhs dest =
 
 let spend_multisig loglevel cfg testnet pkhs dest =
   set_loglevel loglevel ;
+  let pkhs = match pkhs with
+    | [] -> List.map Stdio.In_channel.(input_lines stdin)
+              ~f:(fun s -> Hex.to_string (`Hex s))
+    | _ -> pkhs in
   Lwt_main.run begin
     spend_multisig cfg testnet pkhs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
@@ -284,10 +288,10 @@ let spend_multisig loglevel cfg testnet pkhs dest =
 
 let spend_multisig =
   let doc = "Spend bitcoins from a multisig address." in
-  let pkhs =
-    Arg.(required & (pos 0 (some (list Conv.hex)) None) & info [] ~docv:"PKH") in
   let dest =
-    Arg.(required & (pos 1 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
+    Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
+  let pkhs =
+    Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"PKHS") in
   Term.(const spend_multisig $ loglevel $ cfg $ testnet $ pkhs $ dest),
   Term.info ~doc "spend-multisig"
 
