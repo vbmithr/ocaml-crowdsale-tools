@@ -92,12 +92,19 @@ module Cmdliner = struct
          let `Hex hex_str = Hex.of_string hex in
          fprintf ppf "%s" hex_str)
 
+    let tezos_addr =
+      (fun str ->
+         match Base58.Tezos.of_string str with
+         | Some addr -> `Ok addr
+         | None -> `Error (sprintf "Tezos address expected, got %s" str)),
+      Base58.Tezos.pp
+
     let payment_addr =
       (fun str ->
-         match Base58.of_string str with
+         match Base58.Bitcoin.of_string str with
          | Some addr -> `Ok addr
-         | None -> `Error (sprintf "Payment address expected, got %s" str)),
-      Base58.pp
+         | None -> `Error (sprintf "Bitcoin multisig address expected, got %s" str)),
+      Base58.Bitcoin.pp
   end
 
   open Cmdliner

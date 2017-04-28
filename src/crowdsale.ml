@@ -12,45 +12,48 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let script_and_payment_addr_of_pkh ~cfg ~testnet pkh =
+let script_and_payment_addr_of_tezos_addr ~cfg ~testnet { Base58.Tezos.payload } =
   let scriptRedeem =
     Script.P2SH_multisig.scriptRedeem
-      ~append_script:Script.Script.Opcode.[Data pkh ; Drop]
+      ~append_script:Script.Script.Opcode.[Data payload ; Drop]
       ~threshold:cfg.Cfg.threshold cfg.pks in
   let version =
-    Payment_address.(if testnet then Testnet_P2SH else P2SH) in
+    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   scriptRedeem,
   Payment_address.of_script_exn ~version (Script.of_script scriptRedeem)
 
-let lookup_utxos loglevel cfg testnet pkhs =
+let lookup_utxos loglevel cfg testnet tezos_addrs =
   set_loglevel loglevel ;
-  let pkhs =
-    if List.is_empty pkhs then In_channel.(input_lines stdin) else pkhs in
+  let tezos_addrs =
+    if List.is_empty tezos_addrs then
+      List.map In_channel.(input_lines stdin) ~f:Base58.Tezos.of_string_exn else
+      tezos_addrs in
   let run () =
-    Lwt_log.debug_f "Found %d pkhs" (List.length pkhs) >>= fun () ->
-    let addrs = List.map pkhs ~f:begin fun pkh ->
-        let _script, addr = script_and_payment_addr_of_pkh ~cfg ~testnet pkh in
+    Lwt_log.debug_f "Found %d tezos addresses" (List.length tezos_addrs) >>= fun () ->
+    let payment_addrs = List.map tezos_addrs ~f:begin fun tezos_addr ->
+        let _script, addr =
+          script_and_payment_addr_of_tezos_addr ~cfg ~testnet tezos_addr in
         Payment_address.to_b58check addr
       end in
-    List.iter2_exn pkhs addrs ~f:begin fun pkh (`Base58 addr) ->
-      Lwt_log.ign_debug_f "%s -> %s" pkh addr
+    List.iter2_exn tezos_addrs payment_addrs ~f:begin fun ta pa ->
+      Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show ta) (Base58.Bitcoin.show pa)
     end ;
-    utxos ~testnet addrs >>= function
+    utxos ~testnet payment_addrs >>= function
     | Error err ->
       Lwt_log.error (Http.string_of_error err)
     | Ok utxos ->
       Lwt_log.debug_f "Blockexplorer: found %d utxo(s)" (List.length utxos) >|= fun () ->
-      ignore begin List.iter2 addrs utxos ~f:begin fun a u ->
+      ignore begin List.iter2 payment_addrs utxos ~f:begin fun a u ->
           printf "%s" (Utxo.to_string u)
         end
       end in
   Lwt_main.run (run ())
 
 let lookup_utxos =
-  let doc = "Get Bitcoin UTXOs from a Tezos public key hash." in
-  let pkhs =
-    Arg.(non_empty & (pos_all Conv.hex []) & info [] ~docv:"pkhs") in
-  Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ pkhs),
+  let doc = "Get Bitcoin UTXOs from a Tezos address." in
+  let tezos_addrs =
+    Arg.(non_empty & (pos_all Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDR") in
+  Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ tezos_addrs),
   Term.info ~doc "lookup-utxos"
 
 let broadcast_tx loglevel testnet rawtx =
@@ -130,14 +133,14 @@ let output_of_dest_addr addr ~value =
   let script = Payment_address.to_script addr in
   Transaction.Output.create ~script ~value
 
-let spend_n cfg testnet privkey pkhs amount =
-  let dest_addrs = List.map pkhs
-      ~f:(Fn.compose snd (script_and_payment_addr_of_pkh ~cfg ~testnet)) in
+let spend_n cfg testnet privkey tezos_addrs amount =
+  let dest_addrs = List.map tezos_addrs
+      ~f:(Fn.compose snd (script_and_payment_addr_of_tezos_addr ~cfg ~testnet)) in
   let privkey = Ec_private.of_wif_exn privkey in
   let pubkey = Ec_public.of_private privkey in
   let secret = Ec_private.secret privkey in
   let version =
-    if testnet then Payment_address.Testnet_P2PKH else P2PKH in
+    if testnet then Base58.Bitcoin.Testnet_P2PKH else P2PKH in
   let source = Payment_address.of_point ~version pubkey in
   let source_b58 = Payment_address.to_b58check source in
   utxos ~testnet [source_b58] >|=
@@ -203,14 +206,14 @@ let spend_n cfg testnet privkey pkhs amount =
     printf "%s\n" tx_hex
   end
 
-let spend_n loglevel cfg testnet privkey pkhs amount =
+let spend_n loglevel cfg testnet privkey tezos_addrs amount =
   set_loglevel loglevel ;
-  let pkhs = match pkhs with
+  let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
-              ~f:(fun s -> Hex.to_string (`Hex s))
-    | _ -> pkhs in
+              ~f:Base58.Tezos.of_string_exn
+    | _ -> tezos_addrs in
   Lwt_main.run begin
-    spend_n cfg testnet privkey pkhs amount >|= function
+    spend_n cfg testnet privkey tezos_addrs amount >|= function
     | Ok () -> ()
     | Error err -> Lwt_log.ign_error (Http.string_of_error err)
   end
@@ -221,66 +224,81 @@ let spend_n =
     Arg.(value & opt (some int) None & info ["a" ; "amount"] ~doc) in
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
-  let pkhs =
-    Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"DEST") in
+  let tezos_addrs =
+    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
-  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ pkhs $ amount),
+  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ tezos_addrs $ amount),
   Term.info ~doc "spend-n"
 
-let amount_scriptRedeem_and_inputs_of_pkh ~cfg ~testnet pkh =
-  let scriptRedeem, payment_addr = script_and_payment_addr_of_pkh ~cfg ~testnet pkh in
+type tezos_addr_inputs = {
+  tezos_addr : Base58.Tezos.t ;
+  amount : int ;
+  scriptRedeem : Script.Script.t ;
+  inputs : Transaction.Input.t list ;
+}
+
+let tezos_addr_inputs ~cfg ~testnet tezos_addr =
+  let scriptRedeem, payment_addr =
+    script_and_payment_addr_of_tezos_addr ~cfg ~testnet tezos_addr in
   let addr_b58 = Payment_address.to_b58check payment_addr in
   utxos ~testnet [addr_b58] >|=
   R.map begin fun utxos ->
     let amount = amount_of_utxos utxos in
-    amount, scriptRedeem, List.map utxos ~f:(Fn.compose fst input_and_script_of_utxo)
+    { tezos_addr ;
+      amount ;
+      scriptRedeem ;
+      inputs = List.map utxos ~f:(Fn.compose fst input_and_script_of_utxo) }
   end
 
-let spend_multisig cfg testnet pkhs dest =
+let prepare_multisig_tx cfg testnet tezos_addrs dest =
   let dest = Payment_address.of_b58check_exn dest in
-  let sk1, sk2 = match cfg.Cfg.sks with
-    | sk1 :: sk2 :: _ -> sk1, sk2
-    | _ -> failwith "Not enough sks" in
-  let secret1, secret2 = Ec_private.(secret sk1, secret sk2) in
-  Lwt_list.filter_map_s begin fun pkh ->
-    amount_scriptRedeem_and_inputs_of_pkh ~cfg ~testnet pkh >|= R.to_option
-  end pkhs >|= fun amounts_scripts_and_inputs ->
-  let amounts, scriptRedeems, inputs = List.unzip3 amounts_scripts_and_inputs in
+  Lwt_list.filter_map_s begin fun tezos_addr ->
+    tezos_addr_inputs ~cfg ~testnet tezos_addr >|= R.to_option
+  end tezos_addrs >|= fun tezos_inputs ->
   let total_amount =
-    List.fold_left amounts_scripts_and_inputs ~init:0 ~f:(fun acc (a,_,_) -> acc + a) in
+    List.fold_left tezos_inputs ~init:0 ~f:(fun acc { amount } -> acc + amount) in
   Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
-    (List.length amounts_scripts_and_inputs) total_amount (total_amount // 100_000_000) ;
+    (List.length tezos_inputs) total_amount (total_amount // 100_000_000) ;
   let output = output_of_dest_addr dest ~value:0L in
+  let inputs = List.map tezos_inputs ~f:(fun { inputs } -> inputs) in
   let tx = Transaction.create (List.concat inputs) [output] in
   let fees_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   let tx_size = Transaction.serialized_size tx in
   let spendable_amount = total_amount - tx_size * fees_per_byte in
   let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
   Transaction.set_outputs tx [output] ;
-  let scriptSigs =
-    List.mapi amounts_scripts_and_inputs ~f:begin fun index (amount, scriptRedeem, input) ->
+  tx, tezos_inputs
+
+let spend_multisig cfg testnet tezos_addrs dest =
+  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, tezos_inputs) ->
+  let sk1, sk2 = match cfg.Cfg.sks with
+    | sk1 :: sk2 :: _ -> sk1, sk2
+    | _ -> failwith "Not enough sks" in
+  let secret1, secret2 = Ec_private.(secret sk1, secret sk2) in
+  let inputs =
+    List.mapi tezos_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
       let open Transaction.Sign in
       let prev_out_script = Script.of_script scriptRedeem in
       let ed1 =
         Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
       let ed2 =
         Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret2 () in
-      Script.P2SH_multisig.scriptSig ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem
+      let scriptSig =
+        Script.P2SH_multisig.scriptSig ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem in
+      List.iter inputs ~f:(fun input -> Transaction.Input.set_script input scriptSig) ;
+      inputs
     end in
-  List.iter2_exn inputs scriptSigs ~f:begin fun inputs scriptSig ->
-    List.iter inputs ~f:(fun input -> Transaction.Input.set_script input scriptSig)
-  end ;
   Transaction.set_inputs tx (List.concat inputs) ;
   tx
 
-let spend_multisig loglevel cfg testnet pkhs dest =
+let spend_multisig loglevel cfg testnet tezos_addrs dest =
   set_loglevel loglevel ;
-  let pkhs = match pkhs with
+  let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
-              ~f:(fun s -> Hex.to_string (`Hex s))
-    | _ -> pkhs in
+              ~f:Base58.Tezos.of_string_exn
+    | _ -> tezos_addrs in
   Lwt_main.run begin
-    spend_multisig cfg testnet pkhs dest >|= fun tx ->
+    spend_multisig cfg testnet tezos_addrs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
     printf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
@@ -290,10 +308,24 @@ let spend_multisig =
   let doc = "Spend bitcoins from a multisig address." in
   let dest =
     Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
-  let pkhs =
-    Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"PKHS") in
-  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ pkhs $ dest),
+  let tezos_addrs =
+    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
+  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
   Term.info ~doc "spend-multisig"
+
+let endorse_multisig cfg testnet tezos_addrs dest =
+  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, tezos_addr_inputs) ->
+  let sk = match cfg.Cfg.sks with
+    | sk :: _ -> sk
+    | _ -> failwith "Not enough sks" in
+  let secret = Ec_private.secret sk in
+  let endorsements =
+    List.mapi tezos_addr_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
+      let open Transaction.Sign in
+      let prev_out_script = Script.of_script scriptRedeem in
+      Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
+    end in
+  tezos_addr_inputs, endorsements
 
 let default_cmd =
   let doc = "Crowdsale tools." in

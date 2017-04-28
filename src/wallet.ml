@@ -16,33 +16,36 @@ let loglevel = ref (`Error : loglevel)
 module Wallet = struct
   type t = {
     mnemonic : string list ;
-    pkh : Hex.t ;
-    addr : Base58.t ;
+    tezos_addr : Base58.Tezos.t ;
+    payment_addr : Base58.Bitcoin.t ;
   }
 
   let encoding =
     let open Json_encoding in
     conv
-      (fun { mnemonic ; pkh = `Hex pkh_hex ; addr = `Base58 addr_base58 } ->
-         (mnemonic, pkh_hex, addr_base58))
-      (fun (mnemonic, pkh, addr) ->
-         { mnemonic ; pkh = `Hex pkh ;
-           addr = Base58.of_string_exn addr })
+      (fun { mnemonic ; tezos_addr ; payment_addr } ->
+         Base58.(mnemonic, Tezos.to_string tezos_addr, Bitcoin.to_string payment_addr))
+      (fun (mnemonic, tezos_addr, payment_addr) ->
+         let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
+         let payment_addr = Base58.Bitcoin.of_string_exn payment_addr in
+         { mnemonic ; tezos_addr ; payment_addr })
       (obj3
          (req "mnemonic" (list string))
-         (req "pkh" string)
-         (req "addr" string))
+         (req "tezos_pkh" string)
+         (req "payment_addr" string))
 
   let to_ezjsonm wallet = Json_encoding.construct encoding wallet
 
-  let pp ppf { mnemonic ; pkh = `Hex pkh_str ; addr } =
+  let pp ppf { mnemonic ; tezos_addr ; payment_addr } =
     let open Caml.Format in
     let pp_mnemonic =
       pp_print_list
         ~pp_sep:(fun fmt () -> fprintf fmt " ")
         pp_print_string in
-    fprintf ppf "%a@.%s@.%a"
-      pp_mnemonic mnemonic pkh_str Base58.pp addr
+    fprintf ppf "%a@.%a@.%a"
+      pp_mnemonic mnemonic
+      Base58.Tezos.pp tezos_addr
+      Base58.Bitcoin.pp payment_addr
 
   let show t =
     Caml.Format.asprintf "%a" pp t
@@ -56,6 +59,7 @@ let generate_seed cfg version seed_bytes =
   Generichash.Bytes.update h pk_bytes ;
   let pkh = Generichash.final h in
   let pkh_bytes = Generichash.Bytes.of_hash pkh in
+  let tezos_addr = Base58.Tezos.(create ~version:Address pkh_bytes) in
   let script =
     Script.P2SH_multisig.scriptRedeem
       ~append_script:Script.Script.Opcode.[Data pkh_bytes ; Drop]
@@ -68,17 +72,15 @@ let generate_seed cfg version seed_bytes =
   end ;
   match Payment_address.of_script ~version script with
   | None -> failwith "generate_seed"
-  | Some addr ->
-    (Hex.of_string pkh_bytes),
-    Payment_address.to_b58check addr
+  | Some addr -> tezos_addr, Payment_address.to_b58check addr
 
 let generate_one cfg version passphrase =
   let entropy = Random.Bytes.generate 20 in
   let mnemonic = Mnemonic.of_entropy entropy in
   let seed_bytes = String.subo ~len:32
       (Option.value_exn (Mnemonic.to_seed mnemonic ~passphrase)) in
-  let pkh, addr = generate_seed cfg version seed_bytes in
-  Wallet.{ mnemonic ; pkh ; addr }
+  let tezos_addr, payment_addr = generate_seed cfg version seed_bytes in
+  Wallet.{ mnemonic ; tezos_addr ; payment_addr }
 
 let generate_n cfg version passphrase n =
   let rec inner acc n =
@@ -87,14 +89,14 @@ let generate_n cfg version passphrase n =
     else acc
   in inner [] n
 
-let generate cfg ll testnet json_out only_pkhs n =
+let generate cfg ll testnet json_out only_addrs n =
   begin match List.length ll with
     | 1 -> loglevel := `Info
     | 2 -> loglevel := `Debug
     | _ -> loglevel := `Error
   end ;
   let version =
-    Payment_address.(if testnet then Testnet_P2SH else P2SH) in
+    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   match getpass_confirm () with
   | None ->
       prerr_endline "Passphrase do not match. Aborting." ;
@@ -102,35 +104,38 @@ let generate cfg ll testnet json_out only_pkhs n =
   | Some passphrase ->
       Random.stir () ;
       let wallets = generate_n cfg version passphrase n in
-      match json_out, only_pkhs with
+      match json_out, only_addrs with
       | true, _ ->
         let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
         Out_channel.printf "%s\n" ret
       | _, true ->
         List.iter wallets
-          ~f:(fun { pkh = `Hex pkh_hex } -> Out_channel.printf "%s\n" pkh_hex)
+          ~f:(fun { tezos_addr } ->
+              Out_channel.printf "%s\n" (Base58.Tezos.show tezos_addr))
       | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check cfg testnet mnemonic =
   let version =
-    Payment_address.(if testnet then Testnet_P2SH else P2SH) in
+    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   let passphrase = getpass () in
   match Mnemonic.to_seed ~passphrase mnemonic with
   | None ->
       prerr_endline "Provided mnemonic is invalid" ;
       Caml.exit 1
   | Some seed_bytes ->
-    let pkh, addr = generate_seed cfg version (String.subo ~len:32 seed_bytes) in
-    Out_channel.printf "%s\n" Wallet.(show { mnemonic ; pkh ; addr })
+    let tezos_addr, payment_addr =
+      generate_seed cfg version (String.subo ~len:32 seed_bytes) in
+    let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
+    Out_channel.printf "%s\n" Wallet.(show wallet)
 
 let generate =
   let doc = "Generate a Tezos wallet." in
-  let only_pkhs =
-    let doc = "Output only pkhs." in
-    Arg.(value & flag & info ["only-pkhs"] ~doc) in
+  let only_addrs =
+    let doc = "Output only Tezos addresses." in
+    Arg.(value & flag & info ["only-addrs"] ~doc) in
   let n = Arg.(value & (pos 0 int 1) & info [] ~docv:"N") in
-  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ only_pkhs $ n),
+  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ only_addrs $ n),
   Term.info ~doc "generate"
 
 let check =
