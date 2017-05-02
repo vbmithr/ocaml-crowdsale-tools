@@ -19,7 +19,7 @@ let script_and_payment_addr_of_tezos_addr ~cfg ~testnet { Base58.Tezos.payload }
       ~threshold:cfg.Cfg.threshold cfg.pks in
   let version =
     Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
-  scriptRedeem,
+  Script.of_script scriptRedeem,
   Payment_address.of_script_exn ~version (Script.of_script scriptRedeem)
 
 let lookup_utxos loglevel cfg testnet tezos_addrs =
@@ -235,9 +235,45 @@ let spend_n =
 type tezos_addr_inputs = {
   tezos_addr : Base58.Tezos.t ;
   amount : int ;
-  scriptRedeem : Script.Script.t ;
+  scriptRedeem : Script.t ;
   inputs : Transaction.Input.t list ;
 }
+
+let tezos_addr_inputs_encoding =
+  let open Json_encoding in
+  conv
+    (fun { tezos_addr ; amount ; scriptRedeem ; inputs } ->
+       let tezos_addr = Base58.Tezos.to_string tezos_addr in
+       let `Hex scriptRedeem = Script.to_hex scriptRedeem in
+       let inputs = List.map inputs
+           ~f:(fun i -> let `Hex i_hex = Transaction.Input.to_hex i in i_hex) in
+       (tezos_addr, amount, scriptRedeem, inputs))
+    (fun (tezos_addr, amount, scriptRedeem, inputs) ->
+       let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
+       let scriptRedeem = Script.of_hex_exn (`Hex scriptRedeem) in
+       let inputs = List.map inputs
+           ~f:(fun i_hex -> Transaction.Input.of_hex_exn (`Hex i_hex)) in
+       { tezos_addr ; scriptRedeem ; amount ; inputs })
+    (obj4
+       (req "tezos_addr" string)
+       (req "amount" int)
+       (req "scriptRedeem" string)
+       (req "inputs" (list string)))
+
+type tx = {
+  tx : Transaction.t ;
+  inputs: tezos_addr_inputs list ;
+}
+
+let tx_encoding =
+  let open Json_encoding in
+  conv
+    (fun { tx ; inputs } ->
+       let `Hex tx_hex = Transaction.to_hex tx in (tx_hex, inputs))
+    (fun (tx, inputs) -> { tx = Transaction.of_hex_exn (`Hex tx) ; inputs })
+    (obj2
+       (req "tx" string)
+       (req "inputs" (list tezos_addr_inputs_encoding)))
 
 let tezos_addr_inputs ~cfg ~testnet tezos_addr =
   let scriptRedeem, payment_addr =
@@ -271,6 +307,28 @@ let prepare_multisig_tx cfg testnet tezos_addrs dest =
   Transaction.set_outputs tx [output] ;
   tx, tezos_inputs
 
+let prepare_multisig loglevel cfg testnet tezos_addrs dest =
+  set_loglevel loglevel ;
+  let tezos_addrs = match tezos_addrs with
+    | [] -> List.map Stdio.In_channel.(input_lines stdin)
+              ~f:Base58.Tezos.of_string_exn
+    | _ -> tezos_addrs in
+  Lwt_main.run begin
+    prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, _) ->
+    let `Hex tx_hex = Transaction.to_hex tx in
+    printf "%s\n" (Transaction.show tx) ;
+    printf "%s\n" tx_hex
+  end
+
+let prepare_multisig =
+  let doc = "Prepare a transaction for Ledger." in
+  let dest =
+    Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
+  let tezos_addrs =
+    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
+  Term.(const prepare_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
+  Term.info ~doc "prepare-multisig"
+
 let spend_multisig cfg testnet tezos_addrs dest =
   prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, tezos_inputs) ->
   let sk1, sk2 = match cfg.Cfg.sks with
@@ -280,7 +338,7 @@ let spend_multisig cfg testnet tezos_addrs dest =
   let inputs =
     List.mapi tezos_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
       let open Transaction.Sign in
-      let prev_out_script = Script.of_script scriptRedeem in
+      let prev_out_script = scriptRedeem in
       let ed1 =
         Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
       let ed2 =
@@ -324,7 +382,7 @@ let endorse_multisig cfg testnet tezos_addrs dest =
   let endorsements =
     List.mapi tezos_addr_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
       let open Transaction.Sign in
-      let prev_out_script = Script.of_script scriptRedeem in
+      let prev_out_script = scriptRedeem in
       Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
     end in
   tezos_addr_inputs, endorsements
@@ -341,6 +399,7 @@ let cmds = [
   decode_tx ;
   decode_script ;
   spend_n ;
+  prepare_multisig ;
   spend_multisig ;
 ]
 
