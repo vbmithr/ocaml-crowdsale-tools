@@ -207,6 +207,8 @@ let spend_n cfg testnet privkey tezos_addrs amount =
   end
 
 let spend_n loglevel cfg testnet privkey tezos_addrs amount =
+  let amount =
+    Option.map amount ~f:(fun a -> Int.of_float (Float.(a * 1e8))) in
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
@@ -221,7 +223,7 @@ let spend_n loglevel cfg testnet privkey tezos_addrs amount =
 let spend_n =
   let amount =
     let doc = "Total amount to spend." in
-    Arg.(value & opt (some int) None & info ["a" ; "amount"] ~doc) in
+    Arg.(value & opt (some float) None & info ["a" ; "amount"] ~doc) in
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
   let tezos_addrs =
