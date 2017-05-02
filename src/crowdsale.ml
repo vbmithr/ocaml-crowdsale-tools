@@ -44,7 +44,7 @@ let lookup_utxos loglevel cfg testnet tezos_addrs =
     | Ok utxos ->
       Lwt_log.debug_f "Blockexplorer: found %d utxo(s)" (List.length utxos) >|= fun () ->
       ignore begin List.iter2 payment_addrs utxos ~f:begin fun a u ->
-          printf "%s" (Utxo.to_string u)
+          printf "%s\n" (Utxo.to_string u)
         end
       end in
   Lwt_main.run (run ())
@@ -52,7 +52,7 @@ let lookup_utxos loglevel cfg testnet tezos_addrs =
 let lookup_utxos =
   let doc = "Get Bitcoin UTXOs from a Tezos address." in
   let tezos_addrs =
-    Arg.(non_empty & (pos_all Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDR") in
+    Arg.(value & (pos_all Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDR") in
   Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ tezos_addrs),
   Term.info ~doc "lookup-utxos"
 
