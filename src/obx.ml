@@ -6,33 +6,33 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let decode_tx loglevel rawtx =
+let tx_decode loglevel rawtx =
   set_loglevel loglevel ;
   match Transaction.of_hex (Hex.of_string rawtx) with
   | None -> prerr_endline "Unable to decode"
   | Some tx -> Caml.Format.printf "%a@." Transaction.pp tx
 
-let decode_tx =
+let tx_decode =
   let doc = "Decode and print a transaction in raw format." in
   let rawtx =
     Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const decode_tx $ loglevel $ rawtx),
-  Term.info ~doc "decode-tx"
+  Term.(const tx_decode $ loglevel $ rawtx),
+  Term.info ~doc "tx-decode"
 
-let decode_script loglevel rawscript =
+let script_decode loglevel rawscript =
   set_loglevel loglevel ;
   match Script.of_hex (`Hex rawscript) with
   | None -> prerr_endline "Unable to decode"
   | Some script -> Caml.Format.printf "%a@." Script.pp script
 
-let decode_script =
+let script_decode =
   let doc = "Decode and print a script in raw format." in
   let script =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"SCRIPT") in
-  Term.(const decode_script $ loglevel $ script),
-  Term.info ~doc "decode-script"
+  Term.(const script_decode $ loglevel $ script),
+  Term.info ~doc "script-decode"
 
-let broadcast_tx loglevel testnet rawtx =
+let tx_broadcast loglevel testnet rawtx =
   set_loglevel loglevel ;
   let run () =
     broadcast_tx ~testnet (Hex.of_string rawtx) >>= function
@@ -40,14 +40,14 @@ let broadcast_tx loglevel testnet rawtx =
     | Error err -> Lwt_log.error (Http.string_of_error err) in
   Lwt_main.run (run ())
 
-let broadcast_tx =
+let tx_broadcast =
   let doc = "Broadcast a transaction with blockexplorer.com API." in
   let rawtx =
     Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const broadcast_tx $ loglevel $ testnet $ rawtx),
-  Term.info ~doc "broadcast-tx"
+  Term.(const tx_broadcast $ loglevel $ testnet $ rawtx),
+  Term.info ~doc "tx-broadcast"
 
-let fetch_tx loglevel testnet txid =
+let tx_fetch loglevel testnet txid =
   set_loglevel loglevel ;
   let run () =
     rawtx ~testnet (Hex.of_string txid) >>= function
@@ -61,12 +61,12 @@ let fetch_tx loglevel testnet txid =
       end in
   Lwt_main.run (run ())
 
-let fetch_tx =
+let tx_fetch =
   let doc = "Fetch a transaction from blockexplorer.com API." in
   let txid =
     Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"TXID") in
-  Term.(const fetch_tx $ loglevel $ testnet $ txid),
-  Term.info ~doc "fetch-tx"
+  Term.(const tx_fetch $ loglevel $ testnet $ txid),
+  Term.info ~doc "tx-fetch"
 
 let ec_to_wif loglevel uncompressed testnet ec =
   let compress = not uncompressed in
@@ -122,10 +122,10 @@ let cmds = [
   ec_to_wif ;
   ec_to_public ;
   ec_to_address ;
-  decode_tx ;
-  decode_script ;
-  fetch_tx ;
-  broadcast_tx ;
+  tx_decode ;
+  tx_fetch ;
+  tx_broadcast ;
+  script_decode ;
 ]
 
 let () = match Term.eval_choice default_cmd cmds with
