@@ -288,34 +288,34 @@ let tx_encoding =
        (req "tx" string)
        (req "inputs" (list tezos_addr_inputs_encoding)))
 
-let tezos_addr_inputs ~cfg ~testnet tezos_addr =
+let inputs_of_tezos_addr ~cfg ~testnet tezos_addr =
   let { User.scriptRedeem ; payment_address } =
     User.of_tezos_addr ~cfg ~testnet tezos_addr in
   utxos ~testnet [payment_address] >|=
-  R.map begin fun utxos ->
-    let amount = amount_of_utxos utxos in
-    let inputs =
-      List.map utxos ~f:(Fn.compose fst (input_and_script_of_utxo ~script:scriptRedeem)) in
-    { tezos_addr ; amount ; scriptRedeem ; inputs }
+  R.map begin fun (utxos : Utxo.t list) ->
+    List.fold_left utxos ~init:(0, []) ~f:begin fun (sum, inputs) utxo ->
+      (sum + utxo.amount,
+       (fst (input_and_script_of_utxo ~script:scriptRedeem utxo)) :: inputs)
+    end
   end
 
 let prepare_multisig_tx cfg testnet tezos_addrs dest =
   Lwt_list.filter_map_s begin fun tezos_addr ->
-    tezos_addr_inputs ~cfg ~testnet tezos_addr >|= R.to_option
+    inputs_of_tezos_addr ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
   let total_amount =
-    List.fold_left tezos_inputs ~init:0 ~f:(fun acc { amount } -> acc + amount) in
+    List.fold_left tezos_inputs ~init:0 ~f:(fun acc (amount, _) -> acc + amount) in
   Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
     (List.length tezos_inputs) total_amount (total_amount // 100_000_000) ;
   let output = output_of_dest_addr dest ~value:0L in
-  let inputs = List.map tezos_inputs ~f:(fun { inputs } -> inputs) in
+  let inputs = List.map tezos_inputs ~f:snd in
   let tx = Transaction.create (List.concat inputs) [output] in
   let fees_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   let tx_size = Transaction.serialized_size tx in
   let spendable_amount = total_amount - tx_size * fees_per_byte in
   let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
   Transaction.set_outputs tx [output] ;
-  tx, tezos_inputs
+  tx
 
 let prepare_multisig loglevel cfg testnet tezos_addrs dest =
   set_loglevel loglevel ;
@@ -324,7 +324,7 @@ let prepare_multisig loglevel cfg testnet tezos_addrs dest =
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, _) ->
+    prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
     printf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
@@ -340,25 +340,27 @@ let prepare_multisig =
   Term.info ~doc "prepare-multisig"
 
 let spend_multisig cfg testnet tezos_addrs dest =
-  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, tezos_inputs) ->
+  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
   let sk1, sk2 = match cfg.Cfg.sks with
     | sk1 :: sk2 :: _ -> sk1, sk2
     | _ -> failwith "Not enough sks" in
   let secret1, secret2 = Ec_private.(secret sk1, secret sk2) in
   let inputs =
-    List.mapi tezos_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
+    List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
       let open Transaction.Sign in
-      let prev_out_script = scriptRedeem in
+      let prev_out_script = Transaction.Input.get_script input in
       let ed1 =
         Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
       let ed2 =
         Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret2 () in
       let scriptSig =
-        Script.P2SH_multisig.scriptSig ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem in
-      List.iter inputs ~f:(fun input -> Transaction.Input.set_script input scriptSig) ;
-      inputs
+        Script.P2SH_multisig.scriptSig
+          ~endorsements:[ ed1 ; ed2 ]
+          ~scriptRedeem:prev_out_script in
+      Transaction.Input.set_script input scriptSig ;
+      input
     end in
-  Transaction.set_inputs tx (List.concat inputs) ;
+  Transaction.set_inputs tx inputs ;
   tx
 
 let spend_multisig loglevel cfg testnet tezos_addrs dest =
@@ -384,18 +386,16 @@ let spend_multisig =
   Term.info ~doc "spend-multisig"
 
 let endorse_multisig cfg testnet tezos_addrs dest =
-  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun (tx, tezos_addr_inputs) ->
+  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
   let sk = match cfg.Cfg.sks with
     | sk :: _ -> sk
     | _ -> failwith "Not enough sks" in
   let secret = Ec_private.secret sk in
-  let endorsements =
-    List.mapi tezos_addr_inputs ~f:begin fun index { scriptRedeem ; inputs } ->
-      let open Transaction.Sign in
-      let prev_out_script = scriptRedeem in
-      Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
-    end in
-  tezos_addr_inputs, endorsements
+  List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
+    let open Transaction.Sign in
+    let prev_out_script = Transaction.Input.get_script input in
+    Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
+  end
 
 let default_cmd =
   let doc = "Crowdsale tools." in
