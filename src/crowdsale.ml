@@ -12,15 +12,26 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let script_and_payment_addr_of_tezos_addr ~cfg ~testnet { Base58.Tezos.payload } =
-  let scriptRedeem =
-    Script.P2SH_multisig.scriptRedeem
-      ~append_script:Script.Script.Opcode.[Data payload ; Drop]
-      ~threshold:cfg.Cfg.threshold cfg.pks in
-  let version =
-    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
-  Script.of_script scriptRedeem,
-  Payment_address.of_script_exn ~version (Script.of_script scriptRedeem)
+module User = struct
+  type t = {
+    tezos_addr : Base58.Tezos.t ;
+    scriptRedeem : Script.t ;
+    payment_address : Base58.Bitcoin.t ;
+  }
+
+  let of_tezos_addr ~cfg ~testnet tezos_addr =
+    let scriptRedeem =
+      Script.P2SH_multisig.scriptRedeem
+        ~append_script:Script.Script.Opcode.[Data tezos_addr.Base58.Tezos.payload ; Drop]
+        ~threshold:cfg.Cfg.threshold cfg.pks in
+    let scriptRedeem = Script.of_script scriptRedeem in
+    let version =
+      Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
+    let payment_address =
+      Payment_address.to_b58check
+        (Payment_address.of_script_exn ~version:version scriptRedeem) in
+    { tezos_addr ; scriptRedeem ; payment_address }
+end
 
 let lookup_utxos loglevel cfg testnet tezos_addrs =
   set_loglevel loglevel ;
@@ -31,9 +42,9 @@ let lookup_utxos loglevel cfg testnet tezos_addrs =
   let run () =
     Lwt_log.debug_f "Found %d tezos addresses" (List.length tezos_addrs) >>= fun () ->
     let payment_addrs = List.map tezos_addrs ~f:begin fun tezos_addr ->
-        let _script, addr =
-          script_and_payment_addr_of_tezos_addr ~cfg ~testnet tezos_addr in
-        Payment_address.to_b58check addr
+        let { User.payment_address } =
+          User.of_tezos_addr ~cfg ~testnet tezos_addr in
+        payment_address
       end in
     List.iter2_exn tezos_addrs payment_addrs ~f:begin fun ta pa ->
       Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show ta) (Base58.Bitcoin.show pa)
@@ -118,11 +129,11 @@ let decode_script =
   Term.(const decode_script $ loglevel $ script),
   Term.info ~doc "decode-script"
 
-let input_and_script_of_utxo utxo = match utxo.Utxo.confirmed with
+let input_and_script_of_utxo ?(script = Script.invalid ()) utxo =
+  match utxo.Utxo.confirmed with
   | Unconfirmed _ -> invalid_arg "input_of_utxo: unconfirmed"
   | Confirmed { vout ; scriptPubKey } ->
     let prev_out_hash = Hash.Hash32.of_hex_exn (`Hex utxo.Utxo.txid) in
-    let script = Script.invalid () in
     Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
     Option.value_exn (Script.of_hex (`Hex scriptPubKey))
 
@@ -130,12 +141,14 @@ let amount_of_utxos =
   List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount)
 
 let output_of_dest_addr addr ~value =
-  let script = Payment_address.to_script addr in
+  let script = Payment_address.(of_b58check_exn addr |> to_script) in
   Transaction.Output.create ~script ~value
 
 let spend_n cfg testnet privkey tezos_addrs amount =
-  let dest_addrs = List.map tezos_addrs
-      ~f:(Fn.compose snd (script_and_payment_addr_of_tezos_addr ~cfg ~testnet)) in
+  let dest_addrs = List.map tezos_addrs ~f:begin fun addr ->
+      let { User.payment_address } = User.of_tezos_addr ~cfg ~testnet addr in
+      payment_address
+    end in
   let privkey = Ec_private.of_wif_exn privkey in
   let pubkey = Ec_public.of_private privkey in
   let secret = Ec_private.secret privkey in
@@ -160,7 +173,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
     let inputs = List.map inputs_and_scripts ~f:fst in
     let change_out =
-      output_of_dest_addr source ~value:0L in
+      output_of_dest_addr source_b58 ~value:0L in
     let outputs =
       change_out :: List.map dest_addrs ~f:(output_of_dest_addr ~value:0L) in
     let tx = Transaction.create inputs outputs in
@@ -276,20 +289,17 @@ let tx_encoding =
        (req "inputs" (list tezos_addr_inputs_encoding)))
 
 let tezos_addr_inputs ~cfg ~testnet tezos_addr =
-  let scriptRedeem, payment_addr =
-    script_and_payment_addr_of_tezos_addr ~cfg ~testnet tezos_addr in
-  let addr_b58 = Payment_address.to_b58check payment_addr in
-  utxos ~testnet [addr_b58] >|=
+  let { User.scriptRedeem ; payment_address } =
+    User.of_tezos_addr ~cfg ~testnet tezos_addr in
+  utxos ~testnet [payment_address] >|=
   R.map begin fun utxos ->
     let amount = amount_of_utxos utxos in
-    { tezos_addr ;
-      amount ;
-      scriptRedeem ;
-      inputs = List.map utxos ~f:(Fn.compose fst input_and_script_of_utxo) }
+    let inputs =
+      List.map utxos ~f:(Fn.compose fst (input_and_script_of_utxo ~script:scriptRedeem)) in
+    { tezos_addr ; amount ; scriptRedeem ; inputs }
   end
 
 let prepare_multisig_tx cfg testnet tezos_addrs dest =
-  let dest = Payment_address.of_b58check_exn dest in
   Lwt_list.filter_map_s begin fun tezos_addr ->
     tezos_addr_inputs ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
