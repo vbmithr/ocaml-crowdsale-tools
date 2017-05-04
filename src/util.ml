@@ -3,7 +3,7 @@ open Libbitcoin
 
 module Cfg = struct
   type t = {
-    version : Ec_private.version ;
+    testnet : bool ;
     sks : Ec_private.t list ;
     pks : Ec_public.t list ;
     addrs : Payment_address.t list ;
@@ -13,41 +13,35 @@ module Cfg = struct
     fees_testnet : int ;
   }
 
-  let of_sks ?(version=Ec_private.Mainnet) sks =
+  let of_sks ?(testnet=false) sks =
     let sks = List.map ~f:Ec_private.of_wif_exn sks in
     let pks = List.map sks ~f:Ec_public.of_private in
     let addrs =
       List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
     let addrs_testnet =
       List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-    { version ; sks ; pks ; addrs ; addrs_testnet ;
+    { testnet ; sks ; pks ; addrs ; addrs_testnet ;
       threshold = 2 ; fees = 200 ; fees_testnet = 100 }
 
-  let default = of_sks ~version:Testnet [
+  let default = of_sks ~testnet:true [
       "cPUDdQmiqjMVcPWxn2zJxV2Kdm8G5fbkXyNh9Xd4qfhq6gVtbFCd" ;
       "cQ6aDw6R7fGExboo7MfrNDqXDNMQ8jyh8TTLK9DJmGnSPhvQ68rq" ;
       "cRh1K3z3LAcgVxHNA7aV6UYLKxWNEK4y5qPCJjHie2KPPQCmMBb2"
     ]
 
-  let version_encoding =
-    Json_encoding.string_enum [
-      "testnet", Ec_private.Testnet ;
-      "mainnet", Mainnet ;
-    ]
-
   let encoding =
     let open Json_encoding in
     conv
-      (fun _ -> (Ec_private.Mainnet, [], [], 0, 0, 0))
-      begin fun (version, sks, pks, threshold, fees, fees_testnet) ->
+      (fun _ -> (false, [], [], 0, 0, 0))
+      begin fun (testnet, sks, pks, threshold, fees, fees_testnet) ->
         if List.length sks > 0 then begin
-          let sks = List.map sks ~f:(Ec_private.of_wif_exn ~version) in
+          let sks = List.map sks ~f:(Ec_private.of_wif_exn ~testnet) in
           let pks = List.map sks ~f:Ec_public.of_private in
           let addrs =
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { version ; sks ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
+          { testnet ; sks ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end
         else begin
           let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
@@ -55,10 +49,10 @@ module Cfg = struct
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { version ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
+          { testnet ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end end
       (obj6
-         (dft "version" version_encoding Ec_private.Mainnet)
+         (dft "testnet" bool false)
          (dft "sks" (list string) [])
          (dft "pks" (list string) [])
          (req "threshold" int)

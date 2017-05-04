@@ -67,68 +67,6 @@ let lookup_utxos =
   Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ tezos_addrs),
   Term.info ~doc "lookup-utxos"
 
-let broadcast_tx loglevel testnet rawtx =
-  set_loglevel loglevel ;
-  let run () =
-    broadcast_tx ~testnet (Hex.of_string rawtx) >>= function
-    | Ok (`Hex txid) -> Lwt_log.info txid
-    | Error err -> Lwt_log.error (Http.string_of_error err) in
-  Lwt_main.run (run ())
-
-let broadcast_tx =
-  let doc = "Broadcast a transaction with blockexplorer.com API." in
-  let rawtx =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const broadcast_tx $ loglevel $ testnet $ rawtx),
-  Term.info ~doc "broadcast-tx"
-
-let fetch_tx loglevel testnet txid =
-  set_loglevel loglevel ;
-  let run () =
-    rawtx ~testnet (Hex.of_string txid) >>= function
-    | Error err -> Lwt_log.error (Http.string_of_error err)
-    | Ok t -> begin
-        match Transaction.of_hex t with
-        | None -> Lwt_log.error "Unable to decode raw transaction"
-        | Some tx ->
-          let tx_decoded = Caml.Format.asprintf "%a" Transaction.pp tx in
-          Lwt_log.info tx_decoded
-      end in
-  Lwt_main.run (run ())
-
-let fetch_tx =
-  let doc = "Fetch a transaction from blockexplorer.com API." in
-  let txid =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"TXID") in
-  Term.(const fetch_tx $ loglevel $ testnet $ txid),
-  Term.info ~doc "fetch-tx"
-
-let decode_tx loglevel rawtx =
-  set_loglevel loglevel ;
-  match Transaction.of_hex (Hex.of_string rawtx) with
-  | None -> prerr_endline "Unable to decode"
-  | Some tx -> Caml.Format.printf "%a@." Transaction.pp tx
-
-let decode_tx =
-  let doc = "Decode and print a transaction in raw format." in
-  let rawtx =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const decode_tx $ loglevel $ rawtx),
-  Term.info ~doc "decode-tx"
-
-let decode_script loglevel rawscript =
-  set_loglevel loglevel ;
-  match Script.of_hex (`Hex rawscript) with
-  | None -> prerr_endline "Unable to decode"
-  | Some script -> Caml.Format.printf "%a@." Script.pp script
-
-let decode_script =
-  let doc = "Decode and print a script in raw format." in
-  let script =
-    Arg.(required & (pos 0 (some string) None) & info [] ~docv:"SCRIPT") in
-  Term.(const decode_script $ loglevel $ script),
-  Term.info ~doc "decode-script"
-
 let input_and_script_of_utxo ?(script = Script.invalid ()) utxo =
   match utxo.Utxo.confirmed with
   | Unconfirmed _ -> invalid_arg "input_of_utxo: unconfirmed"
@@ -404,10 +342,6 @@ let default_cmd =
 
 let cmds = [
   lookup_utxos ;
-  broadcast_tx ;
-  fetch_tx ;
-  decode_tx ;
-  decode_script ;
   spend_n ;
   prepare_multisig ;
   spend_multisig ;
