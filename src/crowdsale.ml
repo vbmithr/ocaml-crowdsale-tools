@@ -12,6 +12,8 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
+let tezos_input_size = 318 (* computed in the ocaml-libbitcoin testsuite *)
+
 module User = struct
   type t = {
     tezos_addr : Base58.Tezos.t ;
@@ -67,13 +69,18 @@ let lookup_utxos =
   Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ tezos_addrs),
   Term.info ~doc "lookup-utxos"
 
-let input_and_script_of_utxo ?(script = Script.invalid ()) utxo =
+let input_and_script_of_utxo
+    ?(min_confirmations = 1)
+    ?(script = Script.invalid ())
+    utxo =
   match utxo.Utxo.confirmed with
-  | Unconfirmed _ -> invalid_arg "input_of_utxo: unconfirmed"
+  | Unconfirmed _ -> None
+  | Confirmed { confirmations } when confirmations < min_confirmations -> None
   | Confirmed { vout ; scriptPubKey } ->
     let prev_out_hash = Hash.Hash32.of_hex_exn (`Hex utxo.Utxo.txid) in
-    Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
-    Option.value_exn (Script.of_hex (`Hex scriptPubKey))
+    Some
+      (Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
+       Script.of_hex_exn (`Hex scriptPubKey))
 
 let amount_of_utxos =
   List.fold_left ~init:0 ~f:(fun acc utxo -> acc + utxo.Utxo.amount)
@@ -108,7 +115,8 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     (* Build transaction *)
 
     let nb_dests = List.length dest_addrs in
-    let inputs_and_scripts = List.map utxos ~f:input_and_script_of_utxo in
+    let inputs_and_scripts =
+      List.filter_map utxos ~f:input_and_script_of_utxo in
     let inputs = List.map inputs_and_scripts ~f:fst in
     let change_out =
       output_of_dest_addr source_b58 ~value:0L in
@@ -226,58 +234,78 @@ let tx_encoding =
        (req "tx" string)
        (req "inputs" (list tezos_addr_inputs_encoding)))
 
-let utxos_of_tezos_addr ~cfg ~testnet tezos_addr =
+let utxos_of_tezos_addr ?min_confirmations ~cfg ~testnet tezos_addr =
+  let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
+  let min_amount = tezos_input_size * fee_per_byte in
   let { User.scriptRedeem ; payment_address } =
     User.of_tezos_addr ~cfg ~testnet tezos_addr in
   utxos ~testnet [payment_address] >|=
   R.map begin fun (utxos : Utxo.t list) ->
     List.fold_left utxos ~init:(0, []) ~f:begin fun (sum, inputs) utxo ->
-      (sum + utxo.amount,
-       (fst (input_and_script_of_utxo ~script:scriptRedeem utxo)) :: inputs)
+      if utxo.amount <= min_amount then begin
+        Lwt_log.ign_info_f "discard UTXO with amount %d sats, (fee %d sats/byte)"
+          utxo.amount fee_per_byte ;
+        (sum, inputs)
+      end
+      else
+        let inputs_and_scripts =
+          input_and_script_of_utxo ?min_confirmations ~script:scriptRedeem utxo in
+        match inputs_and_scripts with
+        | None -> (sum, inputs)
+        | Some (input, _script) -> sum + utxo.amount, input :: inputs
     end
   end
 
-let prepare_multisig_tx cfg testnet tezos_addrs dest =
+let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
+  let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   Lwt_list.filter_map_s begin fun tezos_addr ->
-    utxos_of_tezos_addr ~cfg ~testnet tezos_addr >|= R.to_option
+    utxos_of_tezos_addr ~min_confirmations ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
   let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a (_, inputs) ->
       a + List.length inputs
     end in
   let total_amount =
     List.fold_left tezos_inputs ~init:0 ~f:(fun acc (amount, _) -> acc + amount) in
-  Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
+  Lwt_log.ign_debug_f "Selected %d utxos with total amount %d (%f)"
     nb_utxos total_amount (total_amount // 100_000_000) ;
   let output = output_of_dest_addr dest ~value:0L in
   let inputs = List.map tezos_inputs ~f:snd in
   let tx = Transaction.create (List.concat inputs) [output] in
-  let fees_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   let tx_size = Transaction.serialized_size tx in
-  let spendable_amount = total_amount - tx_size * fees_per_byte in
-  let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
-  Transaction.set_outputs tx [output] ;
-  tx
+  let spendable_amount = total_amount - tx_size * fee_per_byte in
+  if spendable_amount <= 0 then
+    None
+  else
+    let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
+    Transaction.set_outputs tx [output] ;
+    Some tx
 
-let prepare_multisig loglevel cfg testnet tezos_addrs dest =
+let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
-    let `Hex tx_hex = Transaction.to_hex tx in
-    if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
-    printf "%s\n" tx_hex
+    prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
+    | None -> Caml.exit 1
+    | Some tx ->
+      let `Hex tx_hex = Transaction.to_hex tx in
+      if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
+      printf "%s\n" tx_hex
   end
 
 let prepare_multisig =
   let doc = "Prepare a transaction for Ledger." in
+  let min_confirmations =
+    let doc = "Minimal number of confirmations required." in
+    Arg.(value & (opt int 1) & info ~doc ["min-confirmations"]) in
   let dest =
     Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
   let tezos_addrs =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
-  Term.(const prepare_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
+  Term.(const prepare_multisig $ loglevel $ cfg $
+        testnet $ min_confirmations $ tezos_addrs $ dest),
   Term.info ~doc "prepare-multisig"
 
 let endorse_multisig loglevel cfg key_id tx =
@@ -339,8 +367,10 @@ let finalize_multisig =
         $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
   Term.info ~doc "finalize-multisig"
 
-let spend_multisig cfg testnet tezos_addrs dest =
-  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
+let spend_multisig cfg testnet min_confirmations tezos_addrs dest =
+  prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
+  | None -> Caml.exit 1
+  | Some tx ->
   let sk1, sk2 = match cfg.Cfg.sks with
     | sk1 :: sk2 :: _ -> sk1, sk2
     | _ -> failwith "Not enough sks" in
@@ -363,14 +393,14 @@ let spend_multisig cfg testnet tezos_addrs dest =
   Transaction.set_inputs tx inputs ;
   tx
 
-let spend_multisig loglevel cfg testnet tezos_addrs dest =
+let spend_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    spend_multisig cfg testnet tezos_addrs dest >|= fun tx ->
+    spend_multisig cfg testnet min_confirmations tezos_addrs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
     if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
@@ -378,11 +408,14 @@ let spend_multisig loglevel cfg testnet tezos_addrs dest =
 
 let spend_multisig =
   let doc = "Spend bitcoins from a multisig address." in
+  let min_confirmations =
+    let doc = "Minimal number of confirmations required." in
+    Arg.(value & (opt int 1) & info ~doc ["min-confirmations"]) in
   let dest =
     Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
   let tezos_addrs =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
-  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
+  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ min_confirmations $ tezos_addrs $ dest),
   Term.info ~doc "spend-multisig"
 
 let default_cmd =
