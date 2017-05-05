@@ -6,17 +6,20 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let tx_decode loglevel rawtx =
+let tx_decode loglevel tx =
   set_loglevel loglevel ;
-  match Transaction.of_hex (Hex.of_string rawtx) with
+  let tx = match tx with
+    | None -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
+    | Some tx -> tx in
+  match Transaction.of_hex (Hex.of_string tx) with
   | None -> prerr_endline "Unable to decode"
   | Some tx -> Caml.Format.printf "%a@." Transaction.pp tx
 
 let tx_decode =
-  let doc = "Decode and print a transaction in raw format." in
-  let rawtx =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const tx_decode $ loglevel $ rawtx),
+  let doc = "Decode a Base16 transaction." in
+  let tx =
+    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
+  Term.(const tx_decode $ loglevel $ tx),
   Term.info ~doc "tx-decode"
 
 let script_decode loglevel rawscript =
@@ -26,25 +29,28 @@ let script_decode loglevel rawscript =
   | Some script -> Caml.Format.printf "%a@." Script.pp script
 
 let script_decode =
-  let doc = "Decode and print a script in raw format." in
+  let doc = "Decode a script to plain text tokens." in
   let script =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"SCRIPT") in
   Term.(const script_decode $ loglevel $ script),
   Term.info ~doc "script-decode"
 
-let tx_broadcast loglevel testnet rawtx =
+let tx_broadcast loglevel testnet tx =
   set_loglevel loglevel ;
+  let tx = match tx with
+    | None -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
+    | Some tx -> tx in
   let run () =
-    broadcast_tx ~testnet (Hex.of_string rawtx) >>= function
+    broadcast_tx ~testnet (Hex.of_string tx) >>= function
     | Ok (`Hex txid) -> Lwt_log.info txid
     | Error err -> Lwt_log.error (Http.string_of_error err) in
   Lwt_main.run (run ())
 
 let tx_broadcast =
   let doc = "Broadcast a transaction with blockexplorer.com API." in
-  let rawtx =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"RAWTX") in
-  Term.(const tx_broadcast $ loglevel $ testnet $ rawtx),
+  let tx =
+    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
+  Term.(const tx_broadcast $ loglevel $ testnet $ tx),
   Term.info ~doc "tx-broadcast"
 
 let tx_fetch loglevel testnet txid =

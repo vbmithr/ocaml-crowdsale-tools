@@ -226,7 +226,7 @@ let tx_encoding =
        (req "tx" string)
        (req "inputs" (list tezos_addr_inputs_encoding)))
 
-let inputs_of_tezos_addr ~cfg ~testnet tezos_addr =
+let utxos_of_tezos_addr ~cfg ~testnet tezos_addr =
   let { User.scriptRedeem ; payment_address } =
     User.of_tezos_addr ~cfg ~testnet tezos_addr in
   utxos ~testnet [payment_address] >|=
@@ -239,12 +239,15 @@ let inputs_of_tezos_addr ~cfg ~testnet tezos_addr =
 
 let prepare_multisig_tx cfg testnet tezos_addrs dest =
   Lwt_list.filter_map_s begin fun tezos_addr ->
-    inputs_of_tezos_addr ~cfg ~testnet tezos_addr >|= R.to_option
+    utxos_of_tezos_addr ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
+  let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a (_, inputs) ->
+      a + List.length inputs
+    end in
   let total_amount =
     List.fold_left tezos_inputs ~init:0 ~f:(fun acc (amount, _) -> acc + amount) in
   Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
-    (List.length tezos_inputs) total_amount (total_amount // 100_000_000) ;
+    nb_utxos total_amount (total_amount // 100_000_000) ;
   let output = output_of_dest_addr dest ~value:0L in
   let inputs = List.map tezos_inputs ~f:snd in
   let tx = Transaction.create (List.concat inputs) [output] in
@@ -264,7 +267,7 @@ let prepare_multisig loglevel cfg testnet tezos_addrs dest =
   Lwt_main.run begin
     prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
-    printf "%s\n" (Transaction.show tx) ;
+    if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
   end
 
@@ -276,6 +279,65 @@ let prepare_multisig =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
   Term.(const prepare_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
   Term.info ~doc "prepare-multisig"
+
+let endorse_multisig loglevel cfg key_id tx =
+  let tx = match tx with
+    | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
+    | Some tx -> tx in
+  let tx = Transaction.of_bytes_exn tx in
+  let sk = List.nth_exn cfg.Cfg.sks key_id in
+  let secret = Ec_private.secret sk in
+  let endorsements = List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
+      let open Transaction.Sign in
+      let prev_out_script = Transaction.Input.get_script input in
+      Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
+    end in
+  List.iter endorsements ~f:begin fun e ->
+    let `Hex e_hex = Hex.of_string e in
+    printf "%s\n" e_hex
+  end
+
+let endorse_multisig =
+  let doc = "Endorse a multisig transaction." in
+  let key_id =
+    let doc = "index of the key to use in the config file." in
+    Arg.(value & (opt int 0) & info ["i" ; "key-id"] ~doc) in
+  let tx =
+    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
+  Term.(const endorse_multisig $ loglevel $ cfg $ key_id $ tx),
+  Term.info ~doc "endorse-multisig"
+
+let finalize_multisig loglevel cfg ed1 ed2 tx =
+  let tx = match tx with
+    | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
+    | Some tx -> tx in
+  let tx = Transaction.of_bytes_exn tx in
+  let inputs = Transaction.get_inputs tx in
+  let ed1s = In_channel.read_lines ed1 in
+  let ed2s = In_channel.read_lines ed2 in
+  let inputs = List.map3_exn inputs ed1s ed2s ~f:begin fun input ed1 ed2 ->
+      let ed1 = Hex.to_string (`Hex ed1) in
+      let ed2 = Hex.to_string (`Hex ed2) in
+      let scriptRedeem = Transaction.Input.get_script input in
+      let scriptSig = Script.P2SH_multisig.scriptSig
+          ~endorsements:[ ed1 ; ed2 ] ~scriptRedeem in
+      Transaction.Input.set_script input scriptSig ;
+      input
+    end in
+  Transaction.set_inputs tx inputs ;
+  let `Hex tx_hex = Transaction.to_hex tx in
+  if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
+  printf "%s\n" tx_hex
+
+let finalize_multisig =
+  let doc = "Finalize a multisig transaction." in
+  let endorsement_file i =
+    Arg.(required & (pos i (some file) None) & info [] ~docv:"FILE") in
+  let tx =
+    Arg.(value & (pos 2 (some Conv.hex) None) & info [] ~docv:"TX") in
+  Term.(const finalize_multisig $ loglevel $ cfg
+        $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
+  Term.info ~doc "finalize-multisig"
 
 let spend_multisig cfg testnet tezos_addrs dest =
   prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
@@ -310,7 +372,7 @@ let spend_multisig loglevel cfg testnet tezos_addrs dest =
   Lwt_main.run begin
     spend_multisig cfg testnet tezos_addrs dest >|= fun tx ->
     let `Hex tx_hex = Transaction.to_hex tx in
-    printf "%s\n" (Transaction.show tx) ;
+    if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
   end
 
@@ -323,18 +385,6 @@ let spend_multisig =
   Term.(const spend_multisig $ loglevel $ cfg $ testnet $ tezos_addrs $ dest),
   Term.info ~doc "spend-multisig"
 
-let endorse_multisig cfg testnet tezos_addrs dest =
-  prepare_multisig_tx cfg testnet tezos_addrs dest >|= fun tx ->
-  let sk = match cfg.Cfg.sks with
-    | sk :: _ -> sk
-    | _ -> failwith "Not enough sks" in
-  let secret = Ec_private.secret sk in
-  List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
-    let open Transaction.Sign in
-    let prev_out_script = Transaction.Input.get_script input in
-    Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
-  end
-
 let default_cmd =
   let doc = "Crowdsale tools." in
   Term.(ret (const (`Help (`Pager, None)))),
@@ -343,8 +393,11 @@ let default_cmd =
 let cmds = [
   lookup_utxos ;
   spend_n ;
-  prepare_multisig ;
   spend_multisig ;
+
+  prepare_multisig ;
+  endorse_multisig ;
+  finalize_multisig ;
 ]
 
 let () = match Term.eval_choice default_cmd cmds with

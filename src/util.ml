@@ -71,6 +71,9 @@ let set_loglevel vs =
     | _ -> Debug in
   Lwt_log.add_rule "*" level
 
+let is_verbose vs = List.length vs > 0
+let is_debug vs = List.length vs > 1
+
 module Cmdliner = struct
   module Conv = struct
     open Caml.Format
