@@ -2,8 +2,14 @@ open Base
 open Libbitcoin
 
 module Cfg = struct
+  let keyPath = "44'/1'/0'/0/0"
+  let threshold = 2
+  let fees = 200
+  let fees_testnet = 100
+
   type t = {
     testnet : bool ;
+    keyPath : string ;
     sks : Ec_private.t list ;
     pks : Ec_public.t list ;
     addrs : Payment_address.t list ;
@@ -20,8 +26,8 @@ module Cfg = struct
       List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
     let addrs_testnet =
       List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-    { testnet ; sks ; pks ; addrs ; addrs_testnet ;
-      threshold = 2 ; fees = 200 ; fees_testnet = 100 }
+    { testnet ; keyPath ; sks ; pks ; addrs ; addrs_testnet ;
+      threshold ; fees ; fees_testnet }
 
   let default = of_sks ~testnet:true [
       "cPUDdQmiqjMVcPWxn2zJxV2Kdm8G5fbkXyNh9Xd4qfhq6gVtbFCd" ;
@@ -32,8 +38,8 @@ module Cfg = struct
   let encoding =
     let open Json_encoding in
     conv
-      (fun _ -> (false, [], [], 0, 0, 0))
-      begin fun (testnet, sks, pks, threshold, fees, fees_testnet) ->
+      (fun _ -> (false, "", [], [], 0, 0, 0))
+      begin fun (testnet, keyPath, sks, pks, threshold, fees, fees_testnet) ->
         if List.length sks > 0 then begin
           let sks = List.map sks ~f:(Ec_private.of_wif_exn ~testnet) in
           let pks = List.map sks ~f:Ec_public.of_private in
@@ -41,7 +47,7 @@ module Cfg = struct
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { testnet ; sks ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
+          { testnet ; keyPath ; sks ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end
         else begin
           let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
@@ -49,15 +55,16 @@ module Cfg = struct
             List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
           let addrs_testnet =
             List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
-          { testnet ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
+          { testnet ; keyPath ; sks = [] ; pks ; addrs ; addrs_testnet ; threshold ; fees ; fees_testnet }
         end end
-      (obj6
+      (obj7
          (dft "testnet" bool false)
+         (dft "keyPath" string keyPath)
          (dft "sks" (list string) [])
          (dft "pks" (list string) [])
          (req "threshold" int)
-         (dft "fees" int 200)
-         (dft "fees_testnet" int 100))
+         (dft "fees" int fees)
+         (dft "fees_testnet" int fees_testnet))
 
   let of_file fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in

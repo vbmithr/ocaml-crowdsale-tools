@@ -35,13 +35,13 @@ let script_decode =
   Term.(const script_decode $ loglevel $ script),
   Term.info ~doc "script-decode"
 
-let tx_broadcast loglevel testnet tx =
+let tx_broadcast loglevel testnet rawtx_bytes =
   set_loglevel loglevel ;
-  let tx = match tx with
+  let rawtx_bytes = match rawtx_bytes with
     | None -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
     | Some tx -> tx in
   let run () =
-    broadcast_tx ~testnet (Hex.of_string tx) >>= function
+    broadcast_tx ~testnet rawtx_bytes >>= function
     | Ok (`Hex txid) -> Lwt_log.info txid
     | Error err -> Lwt_log.error (Http.string_of_error err) in
   Lwt_main.run (run ())
@@ -59,7 +59,7 @@ let tx_fetch loglevel testnet txid =
     rawtx ~testnet (Hex.of_string txid) >>= function
     | Error err -> Lwt_log.error (Http.string_of_error err)
     | Ok t -> begin
-        match Transaction.of_hex t with
+        match Transaction.of_bytes t with
         | None -> Lwt_log.error "Unable to decode raw transaction"
         | Some tx ->
           let tx_decoded = Caml.Format.asprintf "%a" Transaction.pp tx in

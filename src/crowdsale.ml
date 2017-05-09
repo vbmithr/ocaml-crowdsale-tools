@@ -77,7 +77,7 @@ let input_and_script_of_utxo
   | Unconfirmed _ -> None
   | Confirmed { confirmations } when confirmations < min_confirmations -> None
   | Confirmed { vout ; scriptPubKey } ->
-    let prev_out_hash = Hash.Hash32.of_hex_exn (`Hex utxo.Utxo.txid) in
+    let prev_out_hash = Hash.Hash32.of_hex_exn utxo.Utxo.txid in
     Some
       (Transaction.Input.create ~prev_out_hash ~prev_out_index:vout ~script (),
        Script.of_hex_exn (`Hex scriptPubKey))
@@ -194,82 +194,92 @@ let spend_n =
 type tezos_addr_inputs = {
   tezos_addr : Base58.Tezos.t ;
   amount : int ;
-  scriptRedeem : Script.t ;
+  prevtxs : string list ; (* binary raw txs *)
   inputs : Transaction.Input.t list ;
 }
 
-let tezos_addr_inputs_encoding =
-  let open Json_encoding in
-  conv
-    (fun { tezos_addr ; amount ; scriptRedeem ; inputs } ->
-       let tezos_addr = Base58.Tezos.to_string tezos_addr in
-       let `Hex scriptRedeem = Script.to_hex scriptRedeem in
-       let inputs = List.map inputs
-           ~f:(fun i -> let `Hex i_hex = Transaction.Input.to_hex i in i_hex) in
-       (tezos_addr, amount, scriptRedeem, inputs))
-    (fun (tezos_addr, amount, scriptRedeem, inputs) ->
-       let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
-       let scriptRedeem = Script.of_hex_exn (`Hex scriptRedeem) in
-       let inputs = List.map inputs
-           ~f:(fun i_hex -> Transaction.Input.of_hex_exn (`Hex i_hex)) in
-       { tezos_addr ; scriptRedeem ; amount ; inputs })
-    (obj4
-       (req "tezos_addr" string)
-       (req "amount" int)
-       (req "scriptRedeem" string)
-       (req "inputs" (list string)))
+(* let tezos_addr_inputs_encoding = *)
+(*   let open Json_encoding in *)
+(*   conv *)
+(*     (fun { tezos_addr ; amount ; scriptRedeem ; inputs } -> *)
+(*        let tezos_addr = Base58.Tezos.to_string tezos_addr in *)
+(*        let `Hex scriptRedeem = Script.to_hex scriptRedeem in *)
+(*        let inputs = List.map inputs *)
+(*            ~f:(fun i -> let `Hex i_hex = Transaction.Input.to_hex i in i_hex) in *)
+(*        (tezos_addr, amount, scriptRedeem, inputs)) *)
+(*     (fun (tezos_addr, amount, scriptRedeem, inputs) -> *)
+(*        let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in *)
+(*        let scriptRedeem = Script.of_hex_exn (`Hex scriptRedeem) in *)
+(*        let inputs = List.map inputs *)
+(*            ~f:(fun i_hex -> Transaction.Input.of_hex_exn (`Hex i_hex)) in *)
+(*        { tezos_addr ; scriptRedeem ; amount ; inputs }) *)
+(*     (obj4 *)
+(*        (req "tezos_addr" string) *)
+(*        (req "amount" int) *)
+(*        (req "scriptRedeem" string) *)
+(*        (req "inputs" (list string))) *)
 
-type tx = {
-  tx : Transaction.t ;
-  inputs: tezos_addr_inputs list ;
-}
+(* type tx = { *)
+(*   tx : Transaction.t ; *)
+(*   inputs: tezos_addr_inputs list ; *)
+(* } *)
 
-let tx_encoding =
-  let open Json_encoding in
-  conv
-    (fun { tx ; inputs } ->
-       let `Hex tx_hex = Transaction.to_hex tx in (tx_hex, inputs))
-    (fun (tx, inputs) -> { tx = Transaction.of_hex_exn (`Hex tx) ; inputs })
-    (obj2
-       (req "tx" string)
-       (req "inputs" (list tezos_addr_inputs_encoding)))
+(* let tx_encoding = *)
+(*   let open Json_encoding in *)
+(*   conv *)
+(*     (fun { tx ; inputs } -> *)
+(*        let `Hex tx_hex = Transaction.to_hex tx in (tx_hex, inputs)) *)
+(*     (fun (tx, inputs) -> { tx = Transaction.of_hex_exn (`Hex tx) ; inputs }) *)
+(*     (obj2 *)
+(*        (req "tx" string) *)
+(*        (req "inputs" (list tezos_addr_inputs_encoding))) *)
 
 let utxos_of_tezos_addr ?min_confirmations ~cfg ~testnet tezos_addr =
   let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   let min_amount = tezos_input_size * fee_per_byte in
   let { User.scriptRedeem ; payment_address } =
     User.of_tezos_addr ~cfg ~testnet tezos_addr in
-  utxos ~testnet [payment_address] >|=
-  R.map begin fun (utxos : Utxo.t list) ->
-    List.fold_left utxos ~init:(0, []) ~f:begin fun (sum, inputs) utxo ->
-      if utxo.amount <= min_amount then begin
-        Lwt_log.ign_info_f "discard UTXO with amount %d sats, (fee %d sats/byte)"
-          utxo.amount fee_per_byte ;
-        (sum, inputs)
+  utxos ~testnet [payment_address] >>= function
+  | Error err -> Lwt.return (Error err)
+  | Ok utxos ->
+    Lwt_list.filter_map_s begin fun utxo ->
+      rawtx ~testnet utxo.Utxo.txid >|= function
+      | Ok rawtx -> Some rawtx
+      | _ -> None
+    end utxos >|= fun rawtxs ->
+    let amount, prevtxs, inputs =
+      List.fold2_exn rawtxs utxos ~init:(0, [], []) ~f:begin fun (sum, prevtxs, inputs) rawtx utxo ->
+        if utxo.amount <= min_amount then begin
+          Lwt_log.ign_info_f "discard UTXO with amount %d sats, (fee %d sats/byte)"
+            utxo.amount fee_per_byte ;
+          (sum, prevtxs, inputs)
+        end
+        else
+          let input_and_script =
+            input_and_script_of_utxo ?min_confirmations ~script:scriptRedeem utxo in
+          match input_and_script with
+          | None -> sum, prevtxs, inputs
+          | Some (input, _script) -> sum + utxo.amount, rawtx :: prevtxs, input :: inputs
       end
-      else
-        let inputs_and_scripts =
-          input_and_script_of_utxo ?min_confirmations ~script:scriptRedeem utxo in
-        match inputs_and_scripts with
-        | None -> (sum, inputs)
-        | Some (input, _script) -> sum + utxo.amount, input :: inputs
-    end
-  end
+    in
+    Ok { tezos_addr ; amount ; prevtxs ; inputs }
 
 let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
   let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
   Lwt_list.filter_map_s begin fun tezos_addr ->
     utxos_of_tezos_addr ~min_confirmations ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
-  let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a (_, inputs) ->
+  let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a { inputs } ->
       a + List.length inputs
     end in
   let total_amount =
-    List.fold_left tezos_inputs ~init:0 ~f:(fun acc (amount, _) -> acc + amount) in
+    List.fold_left tezos_inputs ~init:0 ~f:(fun a { amount } -> a + amount) in
   Lwt_log.ign_debug_f "Selected %d utxos with total amount %d (%f)"
     nb_utxos total_amount (total_amount // 100_000_000) ;
   let output = output_of_dest_addr dest ~value:0L in
-  let inputs = List.map tezos_inputs ~f:snd in
+  let prevtxs = List.map tezos_inputs ~f:(fun { prevtxs } -> prevtxs) in
+  let prevtxs = List.concat prevtxs in
+  let inputs = List.map tezos_inputs ~f:(fun { inputs } -> inputs) in
   let tx = Transaction.create (List.concat inputs) [output] in
   let tx_size = Transaction.serialized_size tx in
   let spendable_amount = total_amount - tx_size * fee_per_byte in
@@ -278,7 +288,16 @@ let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
   else
     let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
     Transaction.set_outputs tx [output] ;
-    Some tx
+    Some (prevtxs, tx)
+
+let pp_print_quoted_string ppf str =
+  let open Caml.Format in
+  fprintf ppf "\"%s\"" str
+
+let pp_print_quoted_string_list ppf strs =
+  let open Caml.Format in
+  pp_print_list ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
+    pp_print_quoted_string ppf strs
 
 let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
   set_loglevel loglevel ;
@@ -289,10 +308,13 @@ let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
   Lwt_main.run begin
     prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
     | None -> Caml.exit 1
-    | Some tx ->
+    | Some (prevtxs, tx) ->
       let `Hex tx_hex = Transaction.to_hex tx in
       if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
-      printf "%s\n" tx_hex
+      Caml.Format.printf "rawTx = \"%s\"@." tx_hex ;
+      Caml.Format.printf "keyPath = %s@." cfg.keyPath;
+      Caml.Format.printf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
+        (List.map prevtxs ~f:(fun ptx -> let `Hex ptx_hex = Hex.of_string ptx in ptx_hex))
   end
 
 let prepare_multisig =
@@ -370,7 +392,7 @@ let finalize_multisig =
 let spend_multisig cfg testnet min_confirmations tezos_addrs dest =
   prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
   | None -> Caml.exit 1
-  | Some tx ->
+  | Some (_, tx) ->
   let sk1, sk2 = match cfg.Cfg.sks with
     | sk1 :: sk2 :: _ -> sk1, sk2
     | _ -> failwith "Not enough sks" in
