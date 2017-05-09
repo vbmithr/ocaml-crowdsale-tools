@@ -440,12 +440,28 @@ let spend_multisig =
   Term.(const spend_multisig $ loglevel $ cfg $ testnet $ min_confirmations $ tezos_addrs $ dest),
   Term.info ~doc "spend-multisig"
 
+let gen_config loglevel testnet compressed pks =
+  let cfg = Cfg.of_pks ~testnet ~compressed pks in
+  printf "%s\n" (Cfg.to_string cfg)
+
+let gen_config =
+  let doc = "Generate configuration file." in
+  let compressed =
+    let doc = "Import public keys in compressed format." in
+    Arg.(value & flag & info ["c" ; "compressed"] ~doc) in
+  let pks =
+    Arg.(value & (pos_all Conv.hex []) & info [] ~docv:"BTC_PUBLIC_KEY") in
+  Term.(const gen_config $ loglevel $ testnet $ compressed $ pks),
+  Term.info ~doc "gen-config"
+
 let default_cmd =
   let doc = "Crowdsale tools." in
   Term.(ret (const (`Help (`Pager, None)))),
   Term.info ~doc "crowdsale"
 
 let cmds = [
+  gen_config ;
+
   lookup_utxos ;
   spend_n ;
   spend_multisig ;

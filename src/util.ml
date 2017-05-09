@@ -19,6 +19,19 @@ module Cfg = struct
     fees_testnet : int ;
   }
 
+  let of_pks ?(testnet=false) ?(compressed=true) uncompressed_pks =
+    let pk_of_bytes = match compressed with
+      | true -> Ec_public.of_bytes_exn
+      | false -> Ec_public.of_uncomp_point_exn in
+    let sks = [] in
+    let pks = List.map uncompressed_pks ~f:pk_of_bytes in
+    let addrs =
+      List.map pks ~f:Payment_address.(of_point ~version:P2PKH) in
+    let addrs_testnet =
+      List.map pks ~f:Payment_address.(of_point ~version:Testnet_P2PKH) in
+    { testnet ; keyPath ; sks ; pks ; addrs ; addrs_testnet ;
+      threshold ; fees ; fees_testnet }
+
   let of_sks ?(testnet=false) sks =
     let sks = List.map ~f:Ec_private.of_wif_exn sks in
     let pks = List.map sks ~f:Ec_public.of_private in
@@ -38,7 +51,13 @@ module Cfg = struct
   let encoding =
     let open Json_encoding in
     conv
-      (fun _ -> (false, "", [], [], 0, 0, 0))
+      (fun { testnet ; keyPath ; sks ; pks ; addrs ; addrs_testnet ;
+             threshold ; fees ; fees_testnet } ->
+        (testnet, keyPath,
+         List.map sks ~f:Ec_private.to_wif,
+         List.map pks
+           ~f:(fun pk -> let `Hex pk_hex = Ec_public.to_hex pk in pk_hex),
+         threshold, fees, fees_testnet))
       begin fun (testnet, keyPath, sks, pks, threshold, fees, fees_testnet) ->
         if List.length sks > 0 then begin
           let sks = List.map sks ~f:(Ec_private.of_wif_exn ~testnet) in
@@ -69,6 +88,15 @@ module Cfg = struct
   let of_file fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in
     Json_encoding.destruct encoding json
+
+  let to_ezjsonm cfg =
+    Json_encoding.construct encoding cfg
+
+  let pp ppf cfg =
+    Json_repr.(pp ~compact:false (module Ezjsonm) ppf (to_ezjsonm cfg))
+
+  let to_string cfg =
+    Caml.Format.asprintf "%a" pp cfg
 end
 
 let set_loglevel vs =
