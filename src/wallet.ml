@@ -70,9 +70,8 @@ let generate_seed cfg version seed_bytes =
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;
   | #loglevel -> ()
   end ;
-  match Payment_address.of_script ~version script with
-  | None -> failwith "generate_seed"
-  | Some addr -> tezos_addr, Payment_address.to_b58check addr
+  let addr = Payment_address.of_script_exn ~version script in
+  tezos_addr, Payment_address.to_b58check addr
 
 let generate_one cfg version passphrase =
   let entropy = Random.Bytes.generate 20 in
@@ -145,12 +144,39 @@ let check =
   Term.(const check $ cfg $ testnet $ words),
   Term.info ~doc "check"
 
+let payment_address cfg testnet { Base58.Tezos.payload } =
+  let version =
+    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
+  let script =
+    Script.P2SH_multisig.scriptRedeem
+      ~append_script:Script.Script.Opcode.[Data payload ; Drop]
+      ~threshold:cfg.Cfg.threshold cfg.pks in
+  let script = Script.of_script script in
+  let `Hex script_hex = Hex.of_string (Script.to_bytes script) in
+  begin match !loglevel with
+  | `Debug -> Stdio.eprintf "%s\n" script_hex ;
+  | #loglevel -> ()
+  end ;
+  let addr = Payment_address.of_script_exn ~version script in
+  Caml.Format.printf "%a@." Payment_address.pp addr
+
+let payment_address =
+  let doc = "Get a payment address from a Tezos address." in
+  let tezos_addr =
+    Arg.(required & (pos 0 (some Cmdliner.Conv.tezos_addr) None) & info [] ~docv:"TEZOS_ADDRESS") in
+  Term.(const payment_address $ cfg $ testnet $ tezos_addr),
+  Term.info ~doc "payment-address"
+
 let default_cmd =
   let doc = "Wallet operations." in
   Term.(ret (const (`Help (`Pager, None)))),
   Term.info ~doc "wallet"
 
-let cmds = [ generate ; check ]
+let cmds = [
+  generate ;
+  check ;
+  payment_address ;
+]
 
 let () = match Term.eval_choice default_cmd cmds with
   | `Error _ -> Caml.exit 1
