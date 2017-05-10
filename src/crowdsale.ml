@@ -127,7 +127,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     (* Compute fees *)
 
     let size = Transaction.serialized_size tx in
-    let fees_per_byte = if testnet then cfg.fees_testnet else cfg.fees in
+    let fees_per_byte = cfg.fees in
     let fees = size * fees_per_byte in
     let amount_found = amount_of_utxos utxos in
     Lwt_log.ign_debug_f "Found %d utxos with total amount %d (%f)"
@@ -235,7 +235,7 @@ type tezos_addr_inputs = {
 (*        (req "inputs" (list tezos_addr_inputs_encoding))) *)
 
 let utxos_of_tezos_addr ?min_confirmations ~cfg ~testnet tezos_addr =
-  let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
+  let fee_per_byte = cfg.Cfg.fees in
   let min_amount = tezos_input_size * fee_per_byte in
   let { User.scriptRedeem ; payment_address } =
     User.of_tezos_addr ~cfg ~testnet tezos_addr in
@@ -265,7 +265,7 @@ let utxos_of_tezos_addr ?min_confirmations ~cfg ~testnet tezos_addr =
     Ok { tezos_addr ; amount ; prevtxs ; inputs }
 
 let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
-  let fee_per_byte = if testnet then cfg.Cfg.fees_testnet else cfg.fees in
+  let fee_per_byte = cfg.Cfg.fees in
   Lwt_list.filter_map_s begin fun tezos_addr ->
     utxos_of_tezos_addr ~min_confirmations ~cfg ~testnet tezos_addr >|= R.to_option
   end tezos_addrs >|= fun tezos_inputs ->
@@ -299,7 +299,10 @@ let pp_print_quoted_string_list ppf strs =
   pp_print_list ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
     pp_print_quoted_string ppf strs
 
-let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
+let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest key_id =
+  let keyPath = Bip44.create
+      ~coin_type:(if testnet then Bitcoin_testnet else Bitcoin)
+      ~index:key_id () in
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
@@ -312,7 +315,7 @@ let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
       let `Hex tx_hex = Transaction.to_hex tx in
       if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
       Caml.Format.printf "rawTx = \"%s\"@." tx_hex ;
-      Caml.Format.printf "keyPath = %s@." cfg.keyPath;
+      Caml.Format.printf "keyPath = %a@." Bip44.pp keyPath;
       Caml.Format.printf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
         (List.map prevtxs ~f:(fun ptx -> let `Hex ptx_hex = Hex.of_string ptx in ptx_hex))
   end
@@ -326,8 +329,11 @@ let prepare_multisig =
     Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
   let tezos_addrs =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
+  let key_id =
+    let doc = "Ledger key id (using default wallet)" in
+    Arg.(value & (opt int 0) & info ~doc ["i" ; "key-id"]) in
   Term.(const prepare_multisig $ loglevel $ cfg $
-        testnet $ min_confirmations $ tezos_addrs $ dest),
+        testnet $ min_confirmations $ tezos_addrs $ dest $ key_id),
   Term.info ~doc "prepare-multisig"
 
 let endorse_multisig loglevel cfg key_id tx =
@@ -440,18 +446,15 @@ let spend_multisig =
   Term.(const spend_multisig $ loglevel $ cfg $ testnet $ min_confirmations $ tezos_addrs $ dest),
   Term.info ~doc "spend-multisig"
 
-let gen_config loglevel testnet compressed pks =
-  let cfg = Cfg.of_pks ~testnet ~compressed pks in
+let gen_config loglevel testnet pks =
+  let cfg = Cfg.of_pks ~testnet pks in
   printf "%s\n" (Cfg.to_string cfg)
 
 let gen_config =
   let doc = "Generate configuration file." in
-  let compressed =
-    let doc = "Import public keys in compressed format." in
-    Arg.(value & flag & info ["c" ; "compressed"] ~doc) in
   let pks =
     Arg.(value & (pos_all Conv.hex []) & info [] ~docv:"BTC_PUBLIC_KEY") in
-  Term.(const gen_config $ loglevel $ testnet $ compressed $ pks),
+  Term.(const gen_config $ loglevel $ testnet $ pks),
   Term.info ~doc "gen-config"
 
 let default_cmd =

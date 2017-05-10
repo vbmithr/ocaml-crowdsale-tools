@@ -119,6 +119,20 @@ let ec_to_address =
   Term.(const ec_to_address $ loglevel $ testnet $ ec),
   Term.info ~doc "ec-to-address"
 
+let ec_compress loglevel testnet pubkey =
+  let pubkey = Ec_public.of_uncomp_point_exn pubkey in
+  let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
+  let addr = Payment_address.of_point ~version pubkey in
+  Format.printf "%a@.%a@."
+    Ec_public.pp pubkey Payment_address.pp addr
+
+let ec_compress =
+  let doc = "Convert an EC public key to a payment address." in
+  let ec =
+    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"UNCOMPRESSED_EC_PUBLIC_KEY") in
+  Term.(const ec_compress $ loglevel $ testnet $ ec),
+  Term.info ~doc "ec-compress"
+
 let default_cmd =
   let doc = "Bitcoin tools." in
   Term.(ret (const (`Help (`Pager, None)))),
@@ -128,6 +142,7 @@ let cmds = [
   ec_to_wif ;
   ec_to_public ;
   ec_to_address ;
+  ec_compress ;
   tx_decode ;
   tx_fetch ;
   tx_broadcast ;
