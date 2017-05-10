@@ -315,7 +315,7 @@ let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest key
       let `Hex tx_hex = Transaction.to_hex tx in
       if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
       Caml.Format.printf "rawTx = \"%s\"@." tx_hex ;
-      Caml.Format.printf "keyPath = %a@." Bip44.pp keyPath;
+      Caml.Format.printf "keyPath = \"%a\"@." Bip44.pp keyPath;
       Caml.Format.printf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
         (List.map prevtxs ~f:(fun ptx -> let `Hex ptx_hex = Hex.of_string ptx in ptx_hex))
   end
@@ -363,7 +363,7 @@ let endorse_multisig =
   Term.(const endorse_multisig $ loglevel $ cfg $ key_id $ tx),
   Term.info ~doc "endorse-multisig"
 
-let finalize_multisig loglevel cfg ed1 ed2 tx =
+let finalize_multisig loglevel ed1 ed2 tx =
   let tx = match tx with
     | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
     | Some tx -> tx in
@@ -391,7 +391,7 @@ let finalize_multisig =
     Arg.(required & (pos i (some file) None) & info [] ~docv:"FILE") in
   let tx =
     Arg.(value & (pos 2 (some Conv.hex) None) & info [] ~docv:"TX") in
-  Term.(const finalize_multisig $ loglevel $ cfg
+  Term.(const finalize_multisig $ loglevel
         $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
   Term.info ~doc "finalize-multisig"
 
