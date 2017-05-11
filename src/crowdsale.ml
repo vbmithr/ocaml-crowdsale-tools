@@ -146,6 +146,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
       let v = if i = 0 then change else amount_per_addr in
       Transaction.Output.set_value o (Int64.of_int v)
     end ;
+    let outputs = if change < fees then List.tl_exn outputs else outputs in
     Transaction.set_outputs tx outputs ;
 
     (* Sign transaction *)
@@ -188,7 +189,7 @@ let spend_n =
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
   let tezos_addrs =
-    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
+    Arg.(non_empty & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
   Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ tezos_addrs $ amount),
   Term.info ~doc "spend-n"
