@@ -365,8 +365,14 @@ let endorse_multisig =
 
 let finalize_multisig loglevel ed1 ed2 tx =
   let tx = match tx with
-    | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
+    | None -> In_channel.(input_all stdin)
     | Some tx -> tx in
+  let tx = match Toml.Parser.from_string tx with
+    | `Ok cfg -> cfg
+    | `Error (msg, _) -> invalid_arg ("Toml: " ^ msg) in
+  let tx = match TomlTypes.Table.find (Toml.key "rawTx") tx with
+    | TString rawTx -> Hex.to_string (`Hex rawTx)
+    | _ -> invalid_arg "Toml: rawTx is not a string" in
   let tx = Transaction.of_bytes_exn tx in
   let inputs = Transaction.get_inputs tx in
   let ed1s = In_channel.read_lines ed1 in
@@ -390,7 +396,7 @@ let finalize_multisig =
   let endorsement_file i =
     Arg.(required & (pos i (some file) None) & info [] ~docv:"FILE") in
   let tx =
-    Arg.(value & (pos 2 (some Conv.hex) None) & info [] ~docv:"TX") in
+    Arg.(value & (pos 2 (some string) None) & info [] ~docv:"TX") in
   Term.(const finalize_multisig $ loglevel
         $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
   Term.info ~doc "finalize-multisig"
