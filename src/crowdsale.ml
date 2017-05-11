@@ -36,6 +36,7 @@ module User = struct
 end
 
 let lookup_utxos loglevel cfg testnet tezos_addrs =
+  let cfg = Cfg.unopt cfg in
   set_loglevel loglevel ;
   let tezos_addrs =
     if List.is_empty tezos_addrs then
@@ -166,6 +167,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
   end
 
 let spend_n loglevel cfg testnet privkey tezos_addrs amount =
+  let cfg = Cfg.unopt cfg in
   let amount =
     Option.map amount ~f:(fun a -> Int.of_float (Float.(a * 1e8))) in
   set_loglevel loglevel ;
@@ -300,6 +302,7 @@ let pp_print_quoted_string_list ppf strs =
     pp_print_quoted_string ppf strs
 
 let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest key_id =
+  let cfg = Cfg.unopt cfg in
   let keyPath = Bip44.create
       ~coin_type:(if testnet then Bitcoin_testnet else Bitcoin)
       ~index:key_id () in
@@ -337,6 +340,7 @@ let prepare_multisig =
   Term.info ~doc "prepare-multisig"
 
 let endorse_multisig loglevel cfg key_id tx =
+  let cfg = Cfg.unopt cfg in
   let tx = match tx with
     | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
     | Some tx -> tx in
@@ -428,6 +432,7 @@ let spend_multisig cfg testnet min_confirmations tezos_addrs dest =
   tx
 
 let spend_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
+  let cfg = Cfg.unopt cfg in
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)

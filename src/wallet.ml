@@ -89,6 +89,7 @@ let generate_n cfg version passphrase n =
   in inner [] n
 
 let generate cfg ll testnet json_out only_addrs n =
+  let cfg = Cfg.unopt cfg in
   begin match List.length ll with
     | 1 -> loglevel := `Info
     | 2 -> loglevel := `Debug
@@ -115,6 +116,7 @@ let generate cfg ll testnet json_out only_addrs n =
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check cfg testnet mnemonic =
+  let cfg = Cfg.unopt cfg in
   let version =
     Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   let passphrase = getpass () in
@@ -145,6 +147,7 @@ let check =
   Term.info ~doc "check"
 
 let payment_address cfg testnet { Base58.Tezos.payload } =
+  let cfg = Cfg.unopt cfg in
   let version =
     Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   let script =

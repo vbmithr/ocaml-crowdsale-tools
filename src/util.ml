@@ -2,6 +2,8 @@ open Base
 open Libbitcoin
 
 module Cfg = struct
+  let default_location =
+    Caml.Filename.concat (Unix.getenv "HOME") ".tezos-crowdsale"
   let threshold = 2
   let fees = 200
 
@@ -31,12 +33,6 @@ module Cfg = struct
       List.map pks ~f:(Payment_address.of_point ~version) in
     { testnet ; sks ; pks ; addrs ;
       threshold ; fees }
-
-  let default = of_sks ~testnet:true [
-      "cPUDdQmiqjMVcPWxn2zJxV2Kdm8G5fbkXyNh9Xd4qfhq6gVtbFCd" ;
-      "cQ6aDw6R7fGExboo7MfrNDqXDNMQ8jyh8TTLK9DJmGnSPhvQ68rq" ;
-      "cRh1K3z3LAcgVxHNA7aV6UYLKxWNEK4y5qPCJjHie2KPPQCmMBb2"
-    ]
 
   let encoding =
     let open Json_encoding in
@@ -82,6 +78,10 @@ module Cfg = struct
 
   let to_string cfg =
     Caml.Format.asprintf "%a" pp cfg
+
+  let unopt = function
+    | None -> of_file default_location
+    | Some cfg -> cfg
 end
 
 let set_loglevel vs =
@@ -127,7 +127,7 @@ module Cmdliner = struct
   open Cmdliner
   let cfg =
     let doc = "Configuration file to use." in
-    Arg.(value & opt Conv.cfg Cfg.default & info ["c" ; "cfg"] ~doc)
+    Arg.(value & opt (some Conv.cfg) None & info ["c" ; "cfg"] ~doc)
 
   let loglevel =
     let doc = "Print more debug messages. Can be repeated." in
