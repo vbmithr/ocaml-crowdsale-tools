@@ -76,8 +76,8 @@ let generate_seed cfg version seed_bytes =
 let generate_one cfg version passphrase =
   let entropy = Random.Bytes.generate 20 in
   let mnemonic = Mnemonic.of_entropy entropy in
-  let seed_bytes = String.subo ~len:32
-      (Option.value_exn (Mnemonic.to_seed mnemonic ~passphrase)) in
+  let seed_bytes =
+    String.subo ~len:32 (Mnemonic.to_seed_exn mnemonic ~passphrase) in
   let tezos_addr, payment_addr = generate_seed cfg version seed_bytes in
   Wallet.{ mnemonic ; tezos_addr ; payment_addr }
 
