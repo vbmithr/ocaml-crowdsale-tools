@@ -6,6 +6,28 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
+let blk_decode loglevel binary blk =
+  set_loglevel loglevel ;
+  let blk = match blk, binary with
+    | None, false -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
+    | None, true -> Stdio.In_channel.(input_line_exn stdin)
+    | Some blk, false -> Hex.to_string (`Hex blk)
+    | Some blk, true -> blk
+  in
+  match Block.of_bytes blk with
+  | None -> prerr_endline "Unable to decode"
+  | Some block -> Caml.Format.printf "%a@." Block.pp block
+
+let blk_decode =
+  let doc = "Decode a block in binary or Base16 format." in
+  let binary =
+    let doc = "Block is in binary format." in
+    Arg.(value & flag & info ["b" ; "binary"] ~doc) in
+  let blk =
+    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"BLOCK") in
+  Term.(const blk_decode $ loglevel $ binary $ blk),
+  Term.info ~doc "blk-decode"
+
 let tx_decode loglevel tx =
   set_loglevel loglevel ;
   let tx = match tx with
@@ -147,6 +169,7 @@ let cmds = [
   tx_fetch ;
   tx_broadcast ;
   script_decode ;
+  blk_decode ;
 ]
 
 let () = match Term.eval_choice default_cmd cmds with
