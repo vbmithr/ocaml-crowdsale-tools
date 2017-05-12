@@ -340,6 +340,40 @@ let prepare_multisig =
         testnet $ min_confirmations $ tezos_addrs $ dest $ key_id),
   Term.info ~doc "prepare-multisig"
 
+let describe_multisig testnet tx =
+  let tx = match tx with
+    | None -> In_channel.(input_all stdin)
+    | Some tx -> In_channel.read_all tx in
+  let tx = match Toml.Parser.from_string tx with
+    | `Ok cfg -> cfg
+    | `Error (msg, _) -> invalid_arg ("Toml: " ^ msg) in
+  let tx = match TomlTypes.Table.find (Toml.key "rawTx") tx with
+    | TString rawTx -> Hex.to_string (`Hex rawTx)
+    | _ -> invalid_arg "Toml: rawTx is not a string" in
+  let tx = Transaction.of_bytes_exn tx in
+  let outputs = Transaction.get_outputs tx in
+  List.iteri outputs ~f:begin fun i o ->
+    let value = Transaction.Output.get_value o in
+    let value = Float.(Int64.to_float value / 1e8) in
+    let script = Transaction.Output.get_script o in
+    match Script.operation script 2 with
+    | None -> ()
+    | Some operation ->
+      let addr_bytes = Script.Operation.to_bytes operation in
+      let addr_bytes = String.subo addr_bytes ~pos:1 in
+      let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
+      let addr = Base58.Bitcoin.create ~version addr_bytes in
+      Caml.Format.printf "Output %d: %f XBT to %a@."
+        i value Base58.Bitcoin.pp addr ;
+  end
+
+let describe_multisig =
+  let doc = "Describe a transaction in Ledger cfg format." in
+  let tx =
+    Arg.(value & (pos 0 (some file) None) & info [] ~docv:"LEDGER_TX") in
+  Term.(const describe_multisig $ testnet $ tx),
+  Term.info ~doc "describe-multisig"
+
 let endorse_multisig loglevel cfg key_id tx =
   let cfg = Cfg.unopt cfg in
   let tx = match tx with
@@ -482,6 +516,7 @@ let cmds = [
   spend_multisig ;
 
   prepare_multisig ;
+  describe_multisig ;
   endorse_multisig ;
   finalize_multisig ;
 ]
