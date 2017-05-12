@@ -31,7 +31,7 @@ module User = struct
       Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
     let payment_address =
       Payment_address.to_b58check
-        (Payment_address.of_script_exn ~version:version scriptRedeem) in
+        (Payment_address.of_script ~version:version scriptRedeem) in
     { tezos_addr ; scriptRedeem ; payment_address }
 end
 

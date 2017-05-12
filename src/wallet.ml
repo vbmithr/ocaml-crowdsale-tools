@@ -70,7 +70,7 @@ let generate_seed cfg version seed_bytes =
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;
   | #loglevel -> ()
   end ;
-  let addr = Payment_address.of_script_exn ~version script in
+  let addr = Payment_address.of_script ~version script in
   tezos_addr, Payment_address.to_b58check addr
 
 let generate_one cfg version passphrase =
@@ -160,7 +160,7 @@ let payment_address cfg testnet { Base58.Tezos.payload } =
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;
   | #loglevel -> ()
   end ;
-  let addr = Payment_address.of_script_exn ~version script in
+  let addr = Payment_address.of_script ~version script in
   Caml.Format.printf "%a@." Payment_address.pp addr
 
 let payment_address =
