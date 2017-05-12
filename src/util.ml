@@ -8,60 +8,32 @@ module Cfg = struct
   let fees = 200
 
   type t = {
-    testnet : bool ;
-    sks : Ec_private.t list ;
     pks : Ec_public.t list ;
     addrs : Payment_address.t list ;
     threshold : int ;
     fees : int ;
   }
 
-  let of_pks ?(testnet=false) pks =
-    let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-    let sks = [] in
+  let of_pks pks =
     let pks = List.map pks ~f:Ec_public.of_bytes_exn in
-    let addrs =
-      List.map pks ~f:(Payment_address.of_point ~version) in
-    { testnet ; sks ; pks ; addrs ;
-      threshold ; fees }
-
-  let of_sks ?(testnet=false) sks =
-    let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-    let sks = List.map ~f:Ec_private.of_wif_exn sks in
-    let pks = List.map sks ~f:Ec_public.of_private in
-    let addrs =
-      List.map pks ~f:(Payment_address.of_point ~version) in
-    { testnet ; sks ; pks ; addrs ;
-      threshold ; fees }
+    let addrs = List.map pks ~f:Payment_address.of_point in
+    { pks ; addrs ; threshold ; fees }
 
   let encoding =
     let open Json_encoding in
     conv
-      begin fun { testnet ; sks ; pks ; addrs ; threshold ; fees } ->
-        let sks = List.map sks ~f:Ec_private.to_wif in
+      begin fun { pks ; addrs ; threshold ; fees } ->
         let pks = List.map pks
             ~f:(fun pk -> let `Hex pk_hex = Ec_public.to_hex pk in pk_hex) in
-        (testnet, sks, pks, threshold, fees)
+        (pks, threshold, fees)
       end
-      begin fun (testnet, sks, pks, threshold, fees) ->
-        let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-        if List.length sks > 0 then begin
-          let sks = List.map sks ~f:(Ec_private.of_wif_exn ~testnet) in
-          let pks = List.map sks ~f:Ec_public.of_private in
-          let addrs =
-            List.map pks ~f:(Payment_address.of_point ~version) in
-          { testnet ; sks ; pks ; addrs ; threshold ; fees }
-        end
-        else begin
-          let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
-          let addrs =
-            List.map pks ~f:(Payment_address.of_point ~version) in
-          { testnet ; sks = [] ; pks ; addrs ; threshold ; fees }
-        end
+      begin fun (pks, threshold, fees) ->
+        let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
+        let addrs =
+          List.map pks ~f:Payment_address.of_point in
+        { pks ; addrs ; threshold ; fees }
       end
-      (obj5
-         (dft "testnet" bool false)
-         (dft "sks" (list string) [])
+      (obj3
          (dft "pks" (list string) [])
          (dft "threshold" int threshold)
          (dft "fees" int fees))
@@ -132,10 +104,6 @@ module Cmdliner = struct
   let loglevel =
     let doc = "Print more debug messages. Can be repeated." in
     Arg.(value & flag_all & info ["v"] ~doc)
-
-  let testnet =
-    let doc = "Use Bitcoin testnet." in
-    Arg.(value & flag & info ["t" ; "testnet"] ~doc)
 
   let json =
     let doc = "Output in JSON format." in

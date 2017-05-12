@@ -51,7 +51,7 @@ module Wallet = struct
     Caml.Format.asprintf "%a" pp t
 end
 
-let generate_seed cfg version seed_bytes =
+let generate_seed cfg seed_bytes =
   let seed = Sign.Bytes.to_seed seed_bytes in
   let sk, pk = Sign.seed_keypair seed in
   let pk_bytes = Sign.Bytes.of_public_key pk in
@@ -70,40 +70,38 @@ let generate_seed cfg version seed_bytes =
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;
   | #loglevel -> ()
   end ;
-  let addr = Payment_address.of_script ~version script in
+  let addr = Payment_address.of_script script in
   tezos_addr, Payment_address.to_b58check addr
 
-let generate_one cfg version passphrase =
+let generate_one cfg passphrase =
   let entropy = Random.Bytes.generate 20 in
   let mnemonic = Mnemonic.of_entropy entropy in
   let seed_bytes =
     String.subo ~len:32 (Mnemonic.to_seed_exn mnemonic ~passphrase) in
-  let tezos_addr, payment_addr = generate_seed cfg version seed_bytes in
+  let tezos_addr, payment_addr = generate_seed cfg seed_bytes in
   Wallet.{ mnemonic ; tezos_addr ; payment_addr }
 
-let generate_n cfg version passphrase n =
+let generate_n cfg passphrase n =
   let rec inner acc n =
     if n > 0 then
-      inner ((generate_one cfg version passphrase) :: acc) (Caml.pred n)
+      inner ((generate_one cfg passphrase) :: acc) (Caml.pred n)
     else acc
   in inner [] n
 
-let generate cfg ll testnet json_out only_addrs n =
+let generate cfg ll json_out only_addrs n =
   let cfg = Cfg.unopt cfg in
   begin match List.length ll with
     | 1 -> loglevel := `Info
     | 2 -> loglevel := `Debug
     | _ -> loglevel := `Error
   end ;
-  let version =
-    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   match getpass_confirm () with
   | None ->
       prerr_endline "Passphrase do not match. Aborting." ;
       Caml.exit 1
   | Some passphrase ->
       Random.stir () ;
-      let wallets = generate_n cfg version passphrase n in
+      let wallets = generate_n cfg passphrase n in
       match json_out, only_addrs with
       | true, _ ->
         let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
@@ -115,7 +113,7 @@ let generate cfg ll testnet json_out only_addrs n =
       | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
-let check cfg testnet wordsfile =
+let check cfg wordsfile =
   let mnemonic = match wordsfile with
     | None ->
       eprintf "Enter mnemonic: %!" ;
@@ -125,8 +123,6 @@ let check cfg testnet wordsfile =
   match mnemonic with
   | Some mnemonic when List.length mnemonic = 15 -> begin
     let cfg = Cfg.unopt cfg in
-    let version =
-      Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
     let passphrase = getpass () in
     match Mnemonic.to_seed ~passphrase mnemonic with
     | None ->
@@ -134,7 +130,7 @@ let check cfg testnet wordsfile =
       Caml.exit 1
     | Some seed_bytes ->
       let tezos_addr, payment_addr =
-        generate_seed cfg version (String.subo ~len:32 seed_bytes) in
+        generate_seed cfg (String.subo ~len:32 seed_bytes) in
       let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
       printf "%s\n" Wallet.(show wallet)
   end
@@ -148,20 +144,18 @@ let generate =
     let doc = "Output only Tezos addresses." in
     Arg.(value & flag & info ["only-addrs"] ~doc) in
   let n = Arg.(value & (pos 0 int 1) & info [] ~docv:"N") in
-  Term.(const generate $ cfg $ Cmdliner.loglevel $ testnet $ json $ only_addrs $ n),
+  Term.(const generate $ cfg $ Cmdliner.loglevel $ json $ only_addrs $ n),
   Term.info ~doc "generate"
 
 let check =
   let doc = "Check a Tezos wallet." in
   let wordsfile =
     Arg.(value & (pos 0 (some file) None) & info [] ~docv:"WORDS") in
-  Term.(const check $ cfg $ testnet $ wordsfile),
+  Term.(const check $ cfg $ wordsfile),
   Term.info ~doc "check"
 
-let payment_address cfg testnet { Base58.Tezos.payload } =
+let payment_address cfg { Base58.Tezos.payload } =
   let cfg = Cfg.unopt cfg in
-  let version =
-    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
   let script =
     Script.P2SH_multisig.scriptRedeem
       ~append_script:Script.Script.Opcode.[Data payload ; Drop]
@@ -172,14 +166,14 @@ let payment_address cfg testnet { Base58.Tezos.payload } =
   | `Debug -> Stdio.eprintf "%s\n" script_hex ;
   | #loglevel -> ()
   end ;
-  let addr = Payment_address.of_script ~version script in
+  let addr = Payment_address.of_script script in
   Caml.Format.printf "%a@." Payment_address.pp addr
 
 let payment_address =
   let doc = "Get a payment address from a Tezos address." in
   let tezos_addr =
     Arg.(required & (pos 0 (some Cmdliner.Conv.tezos_addr) None) & info [] ~docv:"TEZOS_ADDRESS") in
-  Term.(const payment_address $ cfg $ testnet $ tezos_addr),
+  Term.(const payment_address $ cfg $ tezos_addr),
   Term.info ~doc "payment-address"
 
 let default_cmd =

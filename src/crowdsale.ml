@@ -20,54 +20,17 @@ module User = struct
     payment_address : Base58.Bitcoin.t ;
   }
 
-  let of_tezos_addr ~cfg ~testnet tezos_addr =
+  let of_tezos_addr ~cfg tezos_addr =
     let scriptRedeem =
       Script.P2SH_multisig.scriptRedeem
         ~append_script:Script.Script.Opcode.[Data tezos_addr.Base58.Tezos.payload ; Drop]
         ~threshold:cfg.Cfg.threshold cfg.pks in
     let scriptRedeem = Script.of_script scriptRedeem in
-    let version =
-      Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
     let payment_address =
       Payment_address.to_b58check
-        (Payment_address.of_script ~version:version scriptRedeem) in
+        (Payment_address.of_script scriptRedeem) in
     { tezos_addr ; scriptRedeem ; payment_address }
 end
-
-let lookup_utxos loglevel cfg testnet tezos_addrs =
-  let cfg = Cfg.unopt cfg in
-  set_loglevel loglevel ;
-  let tezos_addrs =
-    if List.is_empty tezos_addrs then
-      List.map In_channel.(input_lines stdin) ~f:Base58.Tezos.of_string_exn else
-      tezos_addrs in
-  let run () =
-    Lwt_log.debug_f "Found %d tezos addresses" (List.length tezos_addrs) >>= fun () ->
-    let payment_addrs = List.map tezos_addrs ~f:begin fun tezos_addr ->
-        let { User.payment_address } =
-          User.of_tezos_addr ~cfg ~testnet tezos_addr in
-        payment_address
-      end in
-    List.iter2_exn tezos_addrs payment_addrs ~f:begin fun ta pa ->
-      Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show ta) (Base58.Bitcoin.show pa)
-    end ;
-    Blockexplorer_lwt.utxos ~testnet payment_addrs >>= function
-    | Error err ->
-      Lwt_log.error (Http.string_of_error err)
-    | Ok utxos ->
-      Lwt_log.debug_f "Blockexplorer: found %d utxo(s)" (List.length utxos) >|= fun () ->
-      ignore begin List.iter2 payment_addrs utxos ~f:begin fun a u ->
-          printf "%s\n" (Utxo.to_string u)
-        end
-      end in
-  Lwt_main.run (run ())
-
-let lookup_utxos =
-  let doc = "Get Bitcoin UTXOs from a Tezos address." in
-  let tezos_addrs =
-    Arg.(value & (pos_all Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDR") in
-  Term.(const lookup_utxos $ loglevel $ cfg $ testnet $ tezos_addrs),
-  Term.info ~doc "lookup-utxos"
 
 let input_and_script_of_utxo
     ?(min_confirmations = 1)
@@ -89,19 +52,17 @@ let output_of_dest_addr addr ~value =
   let script = Payment_address.(of_b58check_exn addr |> to_script) in
   Transaction.Output.create ~script ~value
 
-let spend_n cfg testnet privkey tezos_addrs amount =
+let spend_n cfg privkey tezos_addrs amount =
   let dest_addrs = List.map tezos_addrs ~f:begin fun addr ->
-      let { User.payment_address } = User.of_tezos_addr ~cfg ~testnet addr in
+      let { User.payment_address } = User.of_tezos_addr ~cfg addr in
       payment_address
     end in
   let privkey = Ec_private.of_wif_exn privkey in
   let pubkey = Ec_public.of_private privkey in
   let secret = Ec_private.secret privkey in
-  let version =
-    if testnet then Base58.Bitcoin.Testnet_P2PKH else P2PKH in
-  let source = Payment_address.of_point ~version pubkey in
+  let source = Payment_address.of_point pubkey in
   let source_b58 = Payment_address.to_b58check source in
-  Blockexplorer_lwt.utxos ~testnet [source_b58] >|=
+  Blockexplorer_lwt.utxos [source_b58] >|=
   R.map begin fun utxos ->
     let utxos = List.filter utxos ~f:begin fun utxo ->
         match utxo.Utxo.confirmed with
@@ -166,7 +127,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     printf "%s\n" tx_hex
   end
 
-let spend_n loglevel cfg testnet privkey tezos_addrs amount =
+let spend_n loglevel cfg privkey tezos_addrs amount =
   let cfg = Cfg.unopt cfg in
   let amount =
     Option.map amount ~f:(fun a -> Int.of_float (Float.(a * 1e8))) in
@@ -176,7 +137,7 @@ let spend_n loglevel cfg testnet privkey tezos_addrs amount =
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    spend_n cfg testnet privkey tezos_addrs amount >|= function
+    spend_n cfg privkey tezos_addrs amount >|= function
     | Ok () -> ()
     | Error err -> Lwt_log.ign_error (Http.string_of_error err)
   end
@@ -190,7 +151,7 @@ let spend_n =
   let tezos_addrs =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
-  Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ tezos_addrs $ amount),
+  Term.(const spend_n $ loglevel $ cfg $ privkey $ tezos_addrs $ amount),
   Term.info ~doc "spend-n"
 
 type tezos_addr_inputs = {
@@ -198,42 +159,6 @@ type tezos_addr_inputs = {
   prevtxs : string list ; (* binary raw txs *)
   inputs : Transaction.Input.t list ;
 }
-
-(* let tezos_addr_inputs_encoding = *)
-(*   let open Json_encoding in *)
-(*   conv *)
-(*     (fun { tezos_addr ; amount ; scriptRedeem ; inputs } -> *)
-(*        let tezos_addr = Base58.Tezos.to_string tezos_addr in *)
-(*        let `Hex scriptRedeem = Script.to_hex scriptRedeem in *)
-(*        let inputs = List.map inputs *)
-(*            ~f:(fun i -> let `Hex i_hex = Transaction.Input.to_hex i in i_hex) in *)
-(*        (tezos_addr, amount, scriptRedeem, inputs)) *)
-(*     (fun (tezos_addr, amount, scriptRedeem, inputs) -> *)
-(*        let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in *)
-(*        let scriptRedeem = Script.of_hex_exn (`Hex scriptRedeem) in *)
-(*        let inputs = List.map inputs *)
-(*            ~f:(fun i_hex -> Transaction.Input.of_hex_exn (`Hex i_hex)) in *)
-(*        { tezos_addr ; scriptRedeem ; amount ; inputs }) *)
-(*     (obj4 *)
-(*        (req "tezos_addr" string) *)
-(*        (req "amount" int) *)
-(*        (req "scriptRedeem" string) *)
-(*        (req "inputs" (list string))) *)
-
-(* type tx = { *)
-(*   tx : Transaction.t ; *)
-(*   inputs: tezos_addr_inputs list ; *)
-(* } *)
-
-(* let tx_encoding = *)
-(*   let open Json_encoding in *)
-(*   conv *)
-(*     (fun { tx ; inputs } -> *)
-(*        let `Hex tx_hex = Transaction.to_hex tx in (tx_hex, inputs)) *)
-(*     (fun (tx, inputs) -> { tx = Transaction.of_hex_exn (`Hex tx) ; inputs }) *)
-(*     (obj2 *)
-(*        (req "tx" string) *)
-(*        (req "inputs" (list tezos_addr_inputs_encoding))) *)
 
 let group_utxos_by_address utxos =
   let groups = List.group utxos ~break:begin fun u u' ->
@@ -248,7 +173,7 @@ let payment_addrs_of_hashtbl htbl =
   let users = Hashtbl.Poly.data htbl in
   List.map users ~f:(fun u -> u.User.payment_address)
 
-let get_rawtxs ~testnet txids =
+let get_rawtxs txids =
   let module SC = Set.Using_comparator in
   let empty = SC.empty ~comparator:String.comparator in
   let final = List.fold_left txids ~init:empty ~f:(fun a (`Hex txid) -> SC.add a txid) in
@@ -257,7 +182,7 @@ let get_rawtxs ~testnet txids =
   Lwt_log.debug_f
     "get_rawtxs: will do %d calls to Blockexplorer." nb_txids >>= fun () ->
   Lwt_list.filter_map_s begin fun txid ->
-    Blockexplorer_lwt.rawtx ~testnet txid >|= function
+    Blockexplorer_lwt.rawtx txid >|= function
     | Ok rawtx -> Some rawtx
     | _ -> None
   end txids >>= fun rawtxs ->
@@ -267,21 +192,21 @@ let get_rawtxs ~testnet txids =
   else Lwt.fail_with
       (Printf.sprintf "get_rawtxs: only %d/%d calls succeeded" nb_rawtxs nb_txids)
 
-let utxos_of_tezos_addrs ?min_confirmations ~cfg ~testnet tezos_addrs =
+let utxos_of_tezos_addrs ?min_confirmations ~cfg tezos_addrs =
   let fee_per_byte = cfg.Cfg.fees in
   let min_amount = tezos_input_size * fee_per_byte in
   let tezos_addr_to_user_record = Hashtbl.Poly.create () in
   let payment_addr_to_user_record = Hashtbl.Poly.create () in
   List.iter tezos_addrs ~f:begin fun tezos_addr ->
-      let user = User.of_tezos_addr ~cfg ~testnet tezos_addr in
+      let user = User.of_tezos_addr ~cfg tezos_addr in
       Hashtbl.Poly.set tezos_addr_to_user_record tezos_addr user ;
       Hashtbl.Poly.set payment_addr_to_user_record user.payment_address user
   end ;
   let payment_addresses = payment_addrs_of_hashtbl tezos_addr_to_user_record in
-  Blockexplorer_lwt.utxos ~testnet payment_addresses >>= function
+  Blockexplorer_lwt.utxos payment_addresses >>= function
   | Error err -> Lwt.return (Error err)
   | Ok utxos ->
-    get_rawtxs ~testnet (List.map utxos ~f:(fun u -> u.Utxo.txid)) >|= fun rawtxs ->
+    get_rawtxs (List.map utxos ~f:(fun u -> u.Utxo.txid)) >|= fun rawtxs ->
     let utxos = group_utxos_by_address utxos in
     Ok begin List.map utxos ~f:begin fun (payment_addr, utxos) ->
         let { User.scriptRedeem ; payment_address } =
@@ -307,9 +232,9 @@ let utxos_of_tezos_addrs ?min_confirmations ~cfg ~testnet tezos_addrs =
       end
     end
 
-let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
+let prepare_multisig_tx cfg min_confirmations tezos_addrs dest =
   let fee_per_byte = cfg.Cfg.fees in
-  utxos_of_tezos_addrs ~min_confirmations ~cfg ~testnet tezos_addrs >>= function
+  utxos_of_tezos_addrs ~min_confirmations ~cfg tezos_addrs >>= function
   | Error err ->
     Lwt_log.debug_f "prepare_multisig_tx: utxos_of_tezos_addrs" >>= fun () ->
     Lwt.return_none
@@ -344,18 +269,16 @@ let pp_print_quoted_string_list ppf strs =
   pp_print_list ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
     pp_print_quoted_string ppf strs
 
-let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest key_id =
+let prepare_multisig loglevel cfg min_confirmations tezos_addrs dest key_id =
   let cfg = Cfg.unopt cfg in
-  let keyPath = Bip44.create
-      ~coin_type:(if testnet then Bitcoin_testnet else Bitcoin)
-      ~index:key_id () in
+  let keyPath = Bip44.create ~index:key_id () in
   set_loglevel loglevel ;
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
+    prepare_multisig_tx cfg min_confirmations tezos_addrs dest >|= function
     | None -> Caml.exit 1
     | Some (prevtxs, tx) ->
       let `Hex tx_hex = Transaction.to_hex tx in
@@ -381,10 +304,10 @@ let prepare_multisig =
     let doc = "Ledger key id (using default wallet)" in
     Arg.(value & (opt int 0) & info ~doc ["i" ; "key-id"]) in
   Term.(const prepare_multisig $ loglevel $ cfg $
-        testnet $ min_confirmations $ tezos_addrs $ dest $ key_id),
+        min_confirmations $ tezos_addrs $ dest $ key_id),
   Term.info ~doc "prepare-multisig"
 
-let describe_multisig testnet tx =
+let describe_multisig tx =
   let tx = match tx with
     | None -> In_channel.(input_all stdin)
     | Some tx -> In_channel.read_all tx in
@@ -405,8 +328,7 @@ let describe_multisig testnet tx =
     | Some operation ->
       let addr_bytes = Script.Operation.to_bytes operation in
       let addr_bytes = String.subo addr_bytes ~pos:1 in
-      let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-      let addr = Base58.Bitcoin.create ~version addr_bytes in
+      let addr = Base58.Bitcoin.create addr_bytes in
       Caml.Format.printf "Output %d: %f XBT to %a@."
         i value Base58.Bitcoin.pp addr ;
   end
@@ -415,36 +337,8 @@ let describe_multisig =
   let doc = "Describe a transaction in Ledger cfg format." in
   let tx =
     Arg.(value & (pos 0 (some file) None) & info [] ~docv:"LEDGER_TX") in
-  Term.(const describe_multisig $ testnet $ tx),
+  Term.(const describe_multisig $ tx),
   Term.info ~doc "describe-multisig"
-
-let endorse_multisig loglevel cfg key_id tx =
-  let cfg = Cfg.unopt cfg in
-  let tx = match tx with
-    | None -> Hex.to_string (`Hex In_channel.(input_line_exn stdin))
-    | Some tx -> tx in
-  let tx = Transaction.of_bytes_exn tx in
-  let sk = List.nth_exn cfg.Cfg.sks key_id in
-  let secret = Ec_private.secret sk in
-  let endorsements = List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
-      let open Transaction.Sign in
-      let prev_out_script = Transaction.Input.get_script input in
-      Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret ()
-    end in
-  List.iter endorsements ~f:begin fun e ->
-    let `Hex e_hex = Hex.of_string e in
-    printf "%s\n" e_hex
-  end
-
-let endorse_multisig =
-  let doc = "Endorse a multisig transaction." in
-  let key_id =
-    let doc = "index of the key to use in the config file." in
-    Arg.(value & (opt int 0) & info ["i" ; "key-id"] ~doc) in
-  let tx =
-    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
-  Term.(const endorse_multisig $ loglevel $ cfg $ key_id $ tx),
-  Term.info ~doc "endorse-multisig"
 
 let finalize_multisig loglevel ed1 ed2 tx =
   let tx = match tx with
@@ -484,67 +378,15 @@ let finalize_multisig =
         $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
   Term.info ~doc "finalize-multisig"
 
-let spend_multisig cfg testnet min_confirmations tezos_addrs dest =
-  prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest >|= function
-  | None -> Caml.exit 1
-  | Some (_, tx) ->
-  let sk1, sk2 = match cfg.Cfg.sks with
-    | sk1 :: sk2 :: _ -> sk1, sk2
-    | _ -> failwith "Not enough sks" in
-  let secret1, secret2 = Ec_private.(secret sk1, secret sk2) in
-  let inputs =
-    List.mapi (Transaction.get_inputs tx) ~f:begin fun index input ->
-      let open Transaction.Sign in
-      let prev_out_script = Transaction.Input.get_script input in
-      let ed1 =
-        Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret1 () in
-      let ed2 =
-        Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret:secret2 () in
-      let scriptSig =
-        Script.P2SH_multisig.scriptSig
-          ~endorsements:[ ed1 ; ed2 ]
-          ~scriptRedeem:prev_out_script in
-      Transaction.Input.set_script input scriptSig ;
-      input
-    end in
-  Transaction.set_inputs tx inputs ;
-  tx
-
-let spend_multisig loglevel cfg testnet min_confirmations tezos_addrs dest =
-  let cfg = Cfg.unopt cfg in
-  set_loglevel loglevel ;
-  let tezos_addrs = match tezos_addrs with
-    | [] -> List.map Stdio.In_channel.(input_lines stdin)
-              ~f:Base58.Tezos.of_string_exn
-    | _ -> tezos_addrs in
-  Lwt_main.run begin
-    spend_multisig cfg testnet min_confirmations tezos_addrs dest >|= fun tx ->
-    let `Hex tx_hex = Transaction.to_hex tx in
-    if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
-    printf "%s\n" tx_hex
-  end
-
-let spend_multisig =
-  let doc = "Spend bitcoins from a multisig address." in
-  let min_confirmations =
-    let doc = "Minimal number of confirmations required." in
-    Arg.(value & (opt int 1) & info ~doc ["min-confirmations"]) in
-  let dest =
-    Arg.(required & (pos 0 (some Conv.payment_addr) None) & info [] ~docv:"DEST") in
-  let tezos_addrs =
-    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDRS") in
-  Term.(const spend_multisig $ loglevel $ cfg $ testnet $ min_confirmations $ tezos_addrs $ dest),
-  Term.info ~doc "spend-multisig"
-
-let gen_config loglevel testnet pks =
-  let cfg = Cfg.of_pks ~testnet pks in
+let gen_config loglevel pks =
+  let cfg = Cfg.of_pks pks in
   printf "%s\n" (Cfg.to_string cfg)
 
 let gen_config =
   let doc = "Generate configuration file." in
   let pks =
     Arg.(value & (pos_all Conv.hex []) & info [] ~docv:"BTC_PUBLIC_KEY") in
-  Term.(const gen_config $ loglevel $ testnet $ pks),
+  Term.(const gen_config $ loglevel $ pks),
   Term.info ~doc "gen-config"
 
 let default_cmd =
@@ -555,13 +397,8 @@ let default_cmd =
 let cmds = [
   gen_config ;
 
-  lookup_utxos ;
-  spend_n ;
-  spend_multisig ;
-
   prepare_multisig ;
   describe_multisig ;
-  endorse_multisig ;
   finalize_multisig ;
 ]
 
