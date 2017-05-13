@@ -107,17 +107,19 @@ let generate cfg ll testnet json_out only_addrs n =
       match json_out, only_addrs with
       | true, _ ->
         let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
-        Out_channel.printf "%s\n" ret
+        printf "%s\n" ret
       | _, true ->
         List.iter wallets
           ~f:(fun { tezos_addr } ->
-              Out_channel.printf "%s\n" (Base58.Tezos.show tezos_addr))
+              printf "%s\n" (Base58.Tezos.show tezos_addr))
       | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check cfg testnet wordsfile =
   let mnemonic = match wordsfile with
-    | None -> In_channel.(input_line stdin)
+    | None ->
+      eprintf "Enter mnemonic: %!" ;
+      In_channel.(input_line stdin)
     | Some fn -> List.hd (In_channel.read_lines fn) in
   let mnemonic = Option.map mnemonic ~f:(String.split ~on:' ') in
   match mnemonic with
@@ -134,7 +136,7 @@ let check cfg testnet wordsfile =
       let tezos_addr, payment_addr =
         generate_seed cfg version (String.subo ~len:32 seed_bytes) in
       let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
-      Out_channel.printf "%s\n" Wallet.(show wallet)
+      printf "%s\n" Wallet.(show wallet)
   end
   | _ ->
     prerr_endline "Provided mnemonic must be 15 words." ;
