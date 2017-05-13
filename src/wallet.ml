@@ -115,20 +115,30 @@ let generate cfg ll testnet json_out only_addrs n =
       | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
-let check cfg testnet mnemonic =
-  let cfg = Cfg.unopt cfg in
-  let version =
-    Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
-  let passphrase = getpass () in
-  match Mnemonic.to_seed ~passphrase mnemonic with
-  | None ->
-      prerr_endline "Provided mnemonic is invalid" ;
+let check cfg testnet wordsfile =
+  let mnemonic = match wordsfile with
+    | None -> In_channel.(input_line stdin)
+    | Some fn -> List.hd (In_channel.read_lines fn) in
+  let mnemonic = Option.map mnemonic ~f:(String.split ~on:' ') in
+  match mnemonic with
+  | Some mnemonic when List.length mnemonic = 15 -> begin
+    let cfg = Cfg.unopt cfg in
+    let version =
+      Base58.Bitcoin.(if testnet then Testnet_P2SH else P2SH) in
+    let passphrase = getpass () in
+    match Mnemonic.to_seed ~passphrase mnemonic with
+    | None ->
+      prerr_endline "Provided mnemonic is invalid." ;
       Caml.exit 1
-  | Some seed_bytes ->
-    let tezos_addr, payment_addr =
-      generate_seed cfg version (String.subo ~len:32 seed_bytes) in
-    let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
-    Out_channel.printf "%s\n" Wallet.(show wallet)
+    | Some seed_bytes ->
+      let tezos_addr, payment_addr =
+        generate_seed cfg version (String.subo ~len:32 seed_bytes) in
+      let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
+      Out_channel.printf "%s\n" Wallet.(show wallet)
+  end
+  | _ ->
+    prerr_endline "Provided mnemonic must be 15 words." ;
+    Caml.exit 1
 
 let generate =
   let doc = "Generate a Tezos wallet." in
@@ -141,9 +151,9 @@ let generate =
 
 let check =
   let doc = "Check a Tezos wallet." in
-  let words =
-    Arg.(value & (pos_all string []) & info [] ~docv:"WORDS") in
-  Term.(const check $ cfg $ testnet $ words),
+  let wordsfile =
+    Arg.(value & (pos 0 (some file) None) & info [] ~docv:"WORDS") in
+  Term.(const check $ cfg $ testnet $ wordsfile),
   Term.info ~doc "check"
 
 let payment_address cfg testnet { Base58.Tezos.payload } =
