@@ -1,6 +1,8 @@
 open Base
 open Libbitcoin
 
+let tezos_input_size = 260 (* computed in the ocaml-libbitcoin testsuite *)
+
 module Cfg = struct
   let default_location =
     Caml.Filename.concat (Unix.getenv "HOME") ".tezos-crowdsale"
@@ -94,6 +96,10 @@ module Cmdliner = struct
          | Some addr -> `Ok addr
          | None -> `Error (sprintf "Bitcoin multisig address expected, got %s" str)),
       Base58.Bitcoin.pp
+
+    let uri =
+      (fun str -> try `Ok (Uri.of_string str) with _ -> `Error "Invalid uri"),
+      Uri.pp_hum
   end
 
   open Cmdliner
@@ -120,3 +126,31 @@ let getpass_confirm () =
   if String.compare passwd passwd_confirm <> 0 then None else Some (passwd)
 
 let getpass () = getpass "Enter passphrase: "
+
+module User = struct
+  type t = {
+    tezos_addr : Base58.Tezos.t ;
+    scriptRedeem : Script.t ;
+    payment_address : Base58.Bitcoin.t ;
+  }
+
+  let of_tezos_addr ~cfg tezos_addr =
+    let scriptRedeem =
+      Script.P2SH_multisig.scriptRedeem
+        ~append_script:Script.Script.Opcode.[Data tezos_addr.Base58.Tezos.payload ; Drop]
+        ~threshold:cfg.Cfg.threshold cfg.pks in
+    let scriptRedeem = Script.of_script scriptRedeem in
+    let payment_address =
+      Payment_address.to_b58check
+        (Payment_address.of_script scriptRedeem) in
+    { tezos_addr ; scriptRedeem ; payment_address }
+end
+
+let pp_print_quoted_string ppf str =
+  let open Caml.Format in
+  fprintf ppf "\"%s\"" str
+
+let pp_print_quoted_string_list ppf strs =
+  let open Caml.Format in
+  pp_print_list ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
+    pp_print_quoted_string ppf strs

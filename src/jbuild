@@ -1,5 +1,5 @@
 (executables
- ((names (wallet crowdsale obx))
-  (public_names (wallet crowdsale obx))
+ ((names (wallet crowdsale obx tx_of_dynamo))
+  (public_names (wallet crowdsale obx tx_of_dynamo))
   (preprocess (pps (ppx_sexp_conv)))
   (libraries (base stdio cmdliner toml ocplib-json-typed hex sodium libbitcoin blockexplorer.lwt))))

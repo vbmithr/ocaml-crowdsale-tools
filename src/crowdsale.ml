@@ -11,27 +11,6 @@ open Blockexplorer.Types
 open Util
 open Util.Cmdliner
 
-let tezos_input_size = 260 (* computed in the ocaml-libbitcoin testsuite *)
-
-module User = struct
-  type t = {
-    tezos_addr : Base58.Tezos.t ;
-    scriptRedeem : Script.t ;
-    payment_address : Base58.Bitcoin.t ;
-  }
-
-  let of_tezos_addr ~cfg tezos_addr =
-    let scriptRedeem =
-      Script.P2SH_multisig.scriptRedeem
-        ~append_script:Script.Script.Opcode.[Data tezos_addr.Base58.Tezos.payload ; Drop]
-        ~threshold:cfg.Cfg.threshold cfg.pks in
-    let scriptRedeem = Script.of_script scriptRedeem in
-    let payment_address =
-      Payment_address.to_b58check
-        (Payment_address.of_script scriptRedeem) in
-    { tezos_addr ; scriptRedeem ; payment_address }
-end
-
 let input_and_script_of_utxo
     ?(min_confirmations = 1)
     ?(script = Script.invalid ())
@@ -259,15 +238,6 @@ let prepare_multisig_tx cfg min_confirmations tezos_addrs dest =
       let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
       Transaction.set_outputs tx [output] ;
       Lwt.return_some (prevtxs, tx)
-
-let pp_print_quoted_string ppf str =
-  let open Caml.Format in
-  fprintf ppf "\"%s\"" str
-
-let pp_print_quoted_string_list ppf strs =
-  let open Caml.Format in
-  pp_print_list ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
-    pp_print_quoted_string ppf strs
 
 let prepare_multisig loglevel cfg min_confirmations tezos_addrs dest key_id =
   let cfg = Cfg.unopt cfg in
