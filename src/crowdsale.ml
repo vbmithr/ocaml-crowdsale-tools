@@ -7,7 +7,6 @@ open Lwt.Infix
 open Libbitcoin
 open Blockexplorer
 open Blockexplorer.Types
-open Blockexplorer_lwt
 
 open Util
 open Util.Cmdliner
@@ -52,7 +51,7 @@ let lookup_utxos loglevel cfg testnet tezos_addrs =
     List.iter2_exn tezos_addrs payment_addrs ~f:begin fun ta pa ->
       Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show ta) (Base58.Bitcoin.show pa)
     end ;
-    utxos ~testnet payment_addrs >>= function
+    Blockexplorer_lwt.utxos ~testnet payment_addrs >>= function
     | Error err ->
       Lwt_log.error (Http.string_of_error err)
     | Ok utxos ->
@@ -102,7 +101,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     if testnet then Base58.Bitcoin.Testnet_P2PKH else P2PKH in
   let source = Payment_address.of_point ~version pubkey in
   let source_b58 = Payment_address.to_b58check source in
-  utxos ~testnet [source_b58] >|=
+  Blockexplorer_lwt.utxos ~testnet [source_b58] >|=
   R.map begin fun utxos ->
     let utxos = List.filter utxos ~f:begin fun utxo ->
         match utxo.Utxo.confirmed with
@@ -163,7 +162,7 @@ let spend_n cfg testnet privkey tezos_addrs amount =
     end ;
     Transaction.set_inputs tx inputs ;
     let `Hex tx_hex = Transaction.to_hex tx in
-    printf "%s\n" (Transaction.show tx) ;
+    eprintf "%s\n" (Transaction.show tx) ;
     printf "%s\n" tx_hex
   end
 
@@ -189,13 +188,12 @@ let spend_n =
   let privkey =
     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"PRIVKEY") in
   let tezos_addrs =
-    Arg.(non_empty & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
+    Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
   Term.(const spend_n $ loglevel $ cfg $ testnet $ privkey $ tezos_addrs $ amount),
   Term.info ~doc "spend-n"
 
 type tezos_addr_inputs = {
-  tezos_addr : Base58.Tezos.t ;
   amount : int ;
   prevtxs : string list ; (* binary raw txs *)
   inputs : Transaction.Input.t list ;
@@ -237,61 +235,105 @@ type tezos_addr_inputs = {
 (*        (req "tx" string) *)
 (*        (req "inputs" (list tezos_addr_inputs_encoding))) *)
 
-let utxos_of_tezos_addr ?min_confirmations ~cfg ~testnet tezos_addr =
+let group_utxos_by_address utxos =
+  let groups = List.group utxos ~break:begin fun u u' ->
+      not Base58.Bitcoin.(u.Utxo.address = u'.address)
+    end in
+  List.filter_map groups ~f:begin function
+    | [] -> None
+    | (u :: _) as group -> Some (u.Utxo.address, group)
+  end
+
+let payment_addrs_of_hashtbl htbl =
+  let users = Hashtbl.Poly.data htbl in
+  List.map users ~f:(fun u -> u.User.payment_address)
+
+let get_rawtxs ~testnet txids =
+  let module SC = Set.Using_comparator in
+  let empty = SC.empty ~comparator:String.comparator in
+  let final = List.fold_left txids ~init:empty ~f:(fun a (`Hex txid) -> SC.add a txid) in
+  let txids = List.map (SC.elements final) ~f:(fun txid -> `Hex txid) in
+  let nb_txids = List.length txids in
+  Lwt_log.debug_f
+    "get_rawtxs: will do %d calls to Blockexplorer." nb_txids >>= fun () ->
+  Lwt_list.filter_map_s begin fun txid ->
+    Blockexplorer_lwt.rawtx ~testnet txid >|= function
+    | Ok rawtx -> Some rawtx
+    | _ -> None
+  end txids >>= fun rawtxs ->
+  let nb_txids = List.length txids in
+  let nb_rawtxs = List.length rawtxs in
+  if List.(length rawtxs = length txids) then Lwt.return rawtxs
+  else Lwt.fail_with
+      (Printf.sprintf "get_rawtxs: only %d/%d calls succeeded" nb_rawtxs nb_txids)
+
+let utxos_of_tezos_addrs ?min_confirmations ~cfg ~testnet tezos_addrs =
   let fee_per_byte = cfg.Cfg.fees in
   let min_amount = tezos_input_size * fee_per_byte in
-  let { User.scriptRedeem ; payment_address } =
-    User.of_tezos_addr ~cfg ~testnet tezos_addr in
-  utxos ~testnet [payment_address] >>= function
+  let tezos_addr_to_user_record = Hashtbl.Poly.create () in
+  let payment_addr_to_user_record = Hashtbl.Poly.create () in
+  List.iter tezos_addrs ~f:begin fun tezos_addr ->
+      let user = User.of_tezos_addr ~cfg ~testnet tezos_addr in
+      Hashtbl.Poly.set tezos_addr_to_user_record tezos_addr user ;
+      Hashtbl.Poly.set payment_addr_to_user_record user.payment_address user
+  end ;
+  let payment_addresses = payment_addrs_of_hashtbl tezos_addr_to_user_record in
+  Blockexplorer_lwt.utxos ~testnet payment_addresses >>= function
   | Error err -> Lwt.return (Error err)
   | Ok utxos ->
-    Lwt_list.filter_map_s begin fun utxo ->
-      rawtx ~testnet utxo.Utxo.txid >|= function
-      | Ok rawtx -> Some rawtx
-      | _ -> None
-    end utxos >|= fun rawtxs ->
-    let amount, prevtxs, inputs =
-      List.fold2_exn rawtxs utxos ~init:(0, [], []) ~f:begin fun (sum, prevtxs, inputs) rawtx utxo ->
-        if utxo.amount <= min_amount then begin
-          Lwt_log.ign_info_f "discard UTXO with amount %d sats, (fee %d sats/byte)"
-            utxo.amount fee_per_byte ;
-          (sum, prevtxs, inputs)
-        end
-        else
-          let input_and_script =
-            input_and_script_of_utxo ?min_confirmations ~script:scriptRedeem utxo in
-          match input_and_script with
-          | None -> sum, prevtxs, inputs
-          | Some (input, _script) -> sum + utxo.amount, rawtx :: prevtxs, input :: inputs
+    get_rawtxs ~testnet (List.map utxos ~f:(fun u -> u.Utxo.txid)) >|= fun rawtxs ->
+    let utxos = group_utxos_by_address utxos in
+    Ok begin List.map utxos ~f:begin fun (payment_addr, utxos) ->
+        let { User.scriptRedeem ; payment_address } =
+          Hashtbl.find_exn payment_addr_to_user_record payment_addr in
+        let amount, prevtxs, inputs =
+          List.fold2_exn rawtxs utxos
+            ~init:(0, [], []) ~f:begin fun (sum, prevtxs, inputs) rawtx utxo ->
+            if utxo.amount <= min_amount then begin
+              Lwt_log.ign_info_f "discard UTXO with amount %d sats, (fee %d sats/byte)"
+                utxo.amount fee_per_byte ;
+              sum, prevtxs, inputs
+            end
+            else
+              let input_and_script =
+                input_and_script_of_utxo ?min_confirmations ~script:scriptRedeem utxo in
+              match input_and_script with
+              | None -> sum, prevtxs, inputs
+              | Some (input, _script) ->
+                sum + utxo.amount, rawtx :: prevtxs, input :: inputs
+          end
+        in
+        { amount ; prevtxs ; inputs }
       end
-    in
-    Ok { tezos_addr ; amount ; prevtxs ; inputs }
+    end
 
 let prepare_multisig_tx cfg testnet min_confirmations tezos_addrs dest =
   let fee_per_byte = cfg.Cfg.fees in
-  Lwt_list.filter_map_s begin fun tezos_addr ->
-    utxos_of_tezos_addr ~min_confirmations ~cfg ~testnet tezos_addr >|= R.to_option
-  end tezos_addrs >|= fun tezos_inputs ->
-  let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a { inputs } ->
-      a + List.length inputs
-    end in
-  let total_amount =
-    List.fold_left tezos_inputs ~init:0 ~f:(fun a { amount } -> a + amount) in
-  Lwt_log.ign_debug_f "Selected %d utxos with total amount %d (%f)"
-    nb_utxos total_amount (total_amount // 100_000_000) ;
-  let output = output_of_dest_addr dest ~value:0L in
-  let prevtxs = List.map tezos_inputs ~f:(fun { prevtxs } -> prevtxs) in
-  let prevtxs = List.concat prevtxs in
-  let inputs = List.map tezos_inputs ~f:(fun { inputs } -> inputs) in
-  let tx = Transaction.create (List.concat inputs) [output] in
-  let tx_size = Transaction.serialized_size tx in
-  let spendable_amount = total_amount - tx_size * fee_per_byte in
-  if spendable_amount <= 0 then
-    None
-  else
-    let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
-    Transaction.set_outputs tx [output] ;
-    Some (prevtxs, tx)
+  utxos_of_tezos_addrs ~min_confirmations ~cfg ~testnet tezos_addrs >>= function
+  | Error err ->
+    Lwt_log.debug_f "prepare_multisig_tx: utxos_of_tezos_addrs" >>= fun () ->
+    Lwt.return_none
+  | Ok tezos_inputs ->
+    let nb_utxos = List.fold_left tezos_inputs ~init:0 ~f:begin fun a { inputs } ->
+        a + List.length inputs
+      end in
+    let total_amount =
+      List.fold_left tezos_inputs ~init:0 ~f:(fun a { amount } -> a + amount) in
+    Lwt_log.ign_debug_f "Selected %d utxos with total amount %d (%f)"
+      nb_utxos total_amount (total_amount // 100_000_000) ;
+    let output = output_of_dest_addr dest ~value:0L in
+    let prevtxs = List.map tezos_inputs ~f:(fun { prevtxs } -> prevtxs) in
+    let prevtxs = List.concat prevtxs in
+    let inputs = List.map tezos_inputs ~f:(fun { inputs } -> inputs) in
+    let tx = Transaction.create (List.concat inputs) [output] in
+    let tx_size = Transaction.serialized_size tx in
+    let spendable_amount = total_amount - tx_size * fee_per_byte in
+    if spendable_amount <= 0 then
+      Lwt.return_none
+    else
+      let output = output_of_dest_addr dest ~value:(Int64.of_int spendable_amount) in
+      Transaction.set_outputs tx [output] ;
+      Lwt.return_some (prevtxs, tx)
 
 let pp_print_quoted_string ppf str =
   let open Caml.Format in
@@ -317,7 +359,9 @@ let prepare_multisig loglevel cfg testnet min_confirmations tezos_addrs dest key
     | None -> Caml.exit 1
     | Some (prevtxs, tx) ->
       let `Hex tx_hex = Transaction.to_hex tx in
-      if is_verbose loglevel then eprintf "%s\n" (Transaction.show tx) ;
+      let nb_inputs = List.length (Transaction.get_inputs tx) in
+      if is_verbose loglevel then eprintf "Prepared transaction with %d inputs.\n" nb_inputs ;
+      if is_debug loglevel then eprintf "%s\n" (Transaction.show tx) ;
       Caml.Format.printf "rawTx = \"%s\"@." tx_hex ;
       Caml.Format.printf "keyPath = \"%a\"@." Bip44.pp keyPath;
       Caml.Format.printf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
