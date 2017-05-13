@@ -12,7 +12,7 @@ open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let tezos_input_size = 318 (* computed in the ocaml-libbitcoin testsuite *)
+let tezos_input_size = 260 (* computed in the ocaml-libbitcoin testsuite *)
 
 module User = struct
   type t = {
