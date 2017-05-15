@@ -106,23 +106,24 @@ let safe_post ?(headers=Cohttp.Header.init ()) ~encoding url data =
 
 module Utxo = struct
   type t = {
-    rawtx : string ;
+    tx : string ;
     vout : int ;
-    tezos_addr : Base58.Tezos.t ;
+    tezos_address : Base58.Tezos.t ;
   }
 
   let encoding =
     let open Json_encoding in
     conv
-      (fun { rawtx ; vout ; tezos_addr } ->
-         (rawtx, vout, Base58.Tezos.to_string tezos_addr))
-      (fun (rawtx, vout, tezos_addr) ->
-         let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
-         { rawtx ; vout ; tezos_addr })
-      (obj3
-         (req "rawtx" string)
-         (req "vout" int)
-         (req "tezos_addr" string))
+      (fun { tx ; vout ; tezos_address } ->
+         ((), (tx, vout, Base58.Tezos.to_string tezos_address)))
+      (fun ((), (tx, vout, tezos_addr)) ->
+         let tezos_address = Base58.Tezos.of_string_exn tezos_addr in
+         { tx ; vout ; tezos_address })
+      (merge_objs unit
+         (obj3
+            (req "tx" string)
+            (req "vout" int)
+            (req "tezos_address" string)))
 
   let pp ppf t =
     let json = Json_encoding.construct encoding t in
@@ -161,20 +162,21 @@ end
 
 module Input = struct
   type t = {
-    rawtx : string ;
+    tx : string ;
     input : Transaction.Input.t ;
     amount : Int64.t ;
     txid : Hex.t ;
     vout : int ;
   }
 
-  let create ~rawtx ~input ~amount ~txid ~vout =
-    { rawtx ; input ; amount ; txid ; vout }
+  let create ~tx ~input ~amount ~txid ~vout =
+    { tx ; input ; amount ; txid ; vout }
 
   let to_ack { txid ; vout } = Ack.create ~txid ~vout
 end
 
-let build_tx cfg max_size dest outf base_url =
+let build_tx cfg loglevel max_size dest outf base_url =
+  set_loglevel loglevel ;
   let cfg = Cfg.unopt cfg in
   let url = Uri.with_path base_url "getUtxos" in
   let url = Uri.with_query' url ["limit", string_of_int max_size] in
@@ -182,20 +184,24 @@ let build_tx cfg max_size dest outf base_url =
   safe_get ~encoding url >>= function
   | Error err -> Lwt.fail_with (Http.string_of_error err)
   | Ok utxos ->
-    let scriptRedeems = List.map utxos ~f:begin fun { Utxo.rawtx ; vout ; tezos_addr } ->
-        let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_addr in
+    Lwt_list.iter_s begin fun utxo ->
+      Lwt_log.debug_f "%s" (Utxo.show utxo)
+    end utxos >>= fun () ->
+    let scriptRedeems = List.map utxos ~f:begin fun { Utxo.tx ; vout ; tezos_address } ->
+        let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_address in
         scriptRedeem
       end in
     let inputs =
-      List.map2 utxos scriptRedeems ~f:begin fun  { Utxo.rawtx ; vout } scriptRedeem ->
+      List.map2 utxos scriptRedeems ~f:begin fun  { Utxo.tx = rawtx; vout } scriptRedeem ->
         let tx = Transaction.of_bytes_exn rawtx in
+        Lwt_log.ign_debug_f "%s" (Transaction.show tx) ;
         let outputs = Transaction.get_outputs tx in
         let output = List.nth outputs vout in
         let amount = Transaction.Output.get_value output in
         let txid = Hash.Hash32.to_hex tx.hash in
         let input = Transaction.Input.create
             ~prev_out_hash:tx.hash ~prev_out_index:vout ~script:scriptRedeem () in
-        Input.create ~rawtx ~input ~amount ~txid ~vout
+        Input.create ~tx:rawtx ~input ~amount ~txid ~vout
       end in
     let value =
       List.fold_left inputs ~init:0L ~f:begin fun a { Input.amount } ->
@@ -207,7 +213,7 @@ let build_tx cfg max_size dest outf base_url =
     let script = Script.P2PKH.scriptPubKey dest in
     let output = Transaction.Output.create ~value:spendable_value ~script in
     let tx_inputs = List.map inputs ~f:(fun { Input.input } -> input) in
-    let rawtxs = List.map inputs ~f:(fun { Input.rawtx } -> rawtx) in
+    let rawtxs = List.map inputs ~f:(fun { Input.tx } -> tx) in
     let tx = Transaction.create tx_inputs [output] in
     let `Hex tx_hex = Transaction.to_hex tx in
     Stdio.Out_channel.with_file ~binary:true ~append:false ~fail_if_exists:true outf ~f:begin fun oc ->
@@ -222,6 +228,9 @@ let build_tx cfg max_size dest outf base_url =
     let acks = List.map inputs ~f:Input.to_ack in
     safe_post ~encoding:Json_encoding.(list Ack.encoding) url acks
 
+let build_tx cfg loglevel max_size dest outf base_url =
+  Lwt_main.run (build_tx cfg loglevel max_size dest outf base_url)
+
 let cmd =
   let max_size =
     let doc = "Maximum number of inputs for the transaction." in
@@ -233,7 +242,7 @@ let cmd =
   let url =
     Arg.(required & (pos 2 (some Conv.uri) None & info [] ~docv:"URL")) in
   let doc = "Build a transaction from a Dynamo service." in
-  Term.(const build_tx $ cfg $ max_size $ dest $ outf $ url),
+  Term.(const build_tx $ cfg $ loglevel $ max_size $ dest $ outf $ url),
   Term.info ~doc "tx_of_dynamo"
 
 let () = match Term.eval cmd with
