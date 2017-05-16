@@ -6,8 +6,6 @@ let tezos_input_size = 260 (* computed in the ocaml-libbitcoin testsuite *)
 module Cfg = struct
   let default_location =
     Caml.Filename.concat (Unix.getenv "HOME") ".tezos-crowdsale"
-  let threshold = 2
-  let fees = 200
 
   type t = {
     pks : Ec_public.t list ;
@@ -16,7 +14,7 @@ module Cfg = struct
     fees : int ;
   }
 
-  let of_pks pks =
+  let of_pks ~threshold ~fees pks =
     let pks = List.map pks ~f:Ec_public.of_bytes_exn in
     let addrs = List.map pks ~f:Payment_address.of_point in
     { pks ; addrs ; threshold ; fees }
@@ -36,9 +34,9 @@ module Cfg = struct
         { pks ; addrs ; threshold ; fees }
       end
       (obj3
-         (dft "pks" (list string) [])
-         (dft "threshold" int threshold)
-         (dft "fees" int fees))
+         (req "pks" (list string))
+         (req "threshold" int)
+         (req "fees" int))
 
   let of_file fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in

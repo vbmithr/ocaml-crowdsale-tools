@@ -348,15 +348,17 @@ let finalize_multisig =
         $ (endorsement_file 0) $ (endorsement_file 1) $ tx),
   Term.info ~doc "finalize-multisig"
 
-let gen_config loglevel pks =
-  let cfg = Cfg.of_pks pks in
+let gen_config loglevel threshold pks =
+  let cfg = Cfg.of_pks ~threshold ~fees:300 pks in
   printf "%s\n" (Cfg.to_string cfg)
 
 let gen_config =
   let doc = "Generate configuration file." in
+  let threshold =
+    Arg.(required & (pos 0 (some int) None) & info [] ~docv:"INT") in
   let pks =
-    Arg.(value & (pos_all Conv.hex []) & info [] ~docv:"BTC_PUBLIC_KEY") in
-  Term.(const gen_config $ loglevel $ pks),
+    Arg.(value & (pos_right 1 Conv.hex []) & info [] ~docv:"BTC_PUBLIC_KEY") in
+  Term.(const gen_config $ loglevel $ threshold $ pks),
   Term.info ~doc "gen-config"
 
 let default_cmd =
