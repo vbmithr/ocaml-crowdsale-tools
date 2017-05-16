@@ -1,4 +1,5 @@
-open StdLabels
+open Base
+open Stdio
 open Rresult
 open Cmdliner
 open Lwt.Infix
@@ -10,6 +11,7 @@ open Util
 open Util.Cmdliner
 
 module Http = struct
+  open Caml
   type error =
     | Cohttp of exn
     | Client of string
@@ -61,7 +63,7 @@ let safe_get ?headers ~encoding url =
         R.return (Json_encoding.destruct encoding json)
       with exn ->
         let pp = Json_encoding.print_error ?print_unknown:None in
-        let str = Format.asprintf "%a" pp exn in
+        let str = Caml.Format.asprintf "%a" pp exn in
         raise (Data_encoding str)
 
     end
@@ -79,12 +81,13 @@ let safe_post ?(headers=Cohttp.Header.init ()) ~encoding url data =
   let json =
     Json_encoding.construct encoding data in
   let pp_json ppf json = Json_repr.(pp ~compact:true (module Ezjsonm) ppf json) in
-  let body = Body.of_string (Format.asprintf "%a" pp_json json) in
+  let body = Body.of_string (Caml.Format.asprintf "%a" pp_json json) in
   Lwt.catch
     begin fun () ->
       Client.post ~headers ~body url >>= fun (resp, body) ->
       let status_code = Cohttp.Code.code_of_status resp.status in
-      Body.to_string body >|= fun body_str ->
+      Body.to_string body >>= fun body_str ->
+      Lwt_log.debug body_str >|= fun () ->
       if Cohttp.Code.is_client_error status_code then raise (Client body_str)
       else if Cohttp.Code.is_server_error status_code then raise (Server body_str) ;
       R.return `Null
@@ -115,8 +118,10 @@ module Utxo = struct
     let open Json_encoding in
     conv
       (fun { tx ; vout ; tezos_address } ->
-         ((), (tx, vout, Base58.Tezos.to_string tezos_address)))
-      (fun ((), (tx, vout, tezos_addr)) ->
+         let `Hex tx_hex = Hex.of_string tx in
+         ((), (tx_hex, vout, Base58.Tezos.to_string tezos_address)))
+      (fun ((), (tx_hex, vout, tezos_addr)) ->
+         let tx = Hex.to_string (`Hex tx_hex) in
          let tezos_address = Base58.Tezos.of_string_exn tezos_addr in
          { tx ; vout ; tezos_address })
       (merge_objs unit
@@ -130,16 +135,16 @@ module Utxo = struct
     Json_repr.(pp (module Ezjsonm) ppf json)
 
   let show t =
-    Format.asprintf "%a" pp t
+    Caml.Format.asprintf "%a" pp t
 end
 
 module Ack = struct
-  type t = {
+  type utxo = {
     txid : Hex.t ;
     vout : int ;
   }
 
-  let encoding =
+  let utxo_encoding =
     let open Json_encoding in
     conv
       (fun { txid = `Hex txid; vout } ->
@@ -147,15 +152,71 @@ module Ack = struct
       (fun (txid, vout) ->
          { txid = `Hex txid ; vout })
       (obj2
-         (req "txid" string)
+         (req "txId" string)
          (req "vout" int))
+
+  type accepted = {
+    txid : Hex.t ;
+    filename : string ;
+    blockhash: Hex.t option
+  }
+
+  let accepted_encoding =
+    let open Json_encoding in
+    conv
+      (fun { txid = `Hex txid ; filename ; blockhash } ->
+         let bh = Option.map blockhash ~f:(fun (`Hex bh) -> bh) in
+         (txid, filename, bh))
+      (fun (txid, filename, bh) ->
+         let blockhash = Option.map bh ~f:(fun bh_hex -> `Hex bh_hex) in
+         { txid = `Hex txid ; filename ; blockhash })
+      (obj3
+         (req "txid" string)
+         (req "filename" string)
+         (opt "blockhash" string))
+
+  type meta =
+    | Accepted of accepted
+    | Rejected
+
+  let meta_encoding =
+    let open Json_encoding in
+    union [
+      case string
+        (function Accepted _ -> None | _ -> Some "rejected")
+        (fun _ -> Rejected) ;
+      case accepted_encoding
+        (function Accepted acc -> Some acc | _ -> None)
+        (fun acc -> Accepted acc)
+    ]
+
+  type t = {
+    utxos : utxo list ;
+    meta : meta ;
+  }
+
+  let accept ~txid ~utxos ~filename =
+    let txid = Hash.Hash32.to_hex txid in
+    let meta = Accepted { txid ; filename ; blockhash = None } in
+    { utxos ; meta }
+
+  let reject ~utxos = { utxos ; meta = Rejected }
+
+  let encoding =
+    let open Json_encoding in
+    conv
+      (fun { utxos ; meta } -> (utxos, meta))
+      (fun (utxos, meta) -> { utxos ; meta })
+      (obj2
+         (req "utxos" (list utxo_encoding))
+         (req "meta" meta_encoding))
 
   let pp ppf t =
     let json = Json_encoding.construct encoding t in
     Json_repr.(pp (module Ezjsonm) ppf json)
 
   let show t =
-    Format.asprintf "%a" pp t
+    Caml.Format.asprintf "%a" pp t
 
   let create ~txid ~vout = { txid ; vout }
 end
@@ -175,61 +236,98 @@ module Input = struct
   let to_ack { txid ; vout } = Ack.create ~txid ~vout
 end
 
-let build_tx cfg loglevel max_size dest outf base_url =
+let inputs_of_utxos_scripts_exn cfg utxos scriptRedeems =
+  let minimal_input_amount = Int64.of_int (cfg.Cfg.fees * tezos_input_size) in
+  Lwt_log.ign_debug_f "Not including utxos with less than %Ld sats" minimal_input_amount ;
+  let utxos_scripts = List.zip_exn utxos scriptRedeems in
+  List.partition_map utxos_scripts ~f:begin fun ({ Utxo.tx = rawtx; vout }, scriptRedeem) ->
+    let tx = Transaction.of_bytes_exn rawtx in
+    Lwt_log.ign_debug_f "%s" (Transaction.show tx) ;
+    let outputs = Transaction.get_outputs tx in
+    let output = List.nth_exn outputs vout in
+    let amount = Transaction.Output.get_value output in
+    let txid = Hash.Hash32.to_hex tx.hash in
+    match Int64.(amount <= minimal_input_amount) with
+    | true -> `Snd (Ack.create ~txid ~vout)
+    | false ->
+      let input = Transaction.Input.create
+          ~prev_out_hash:tx.hash ~prev_out_index:vout ~script:scriptRedeem () in
+      `Fst (Input.create ~tx:rawtx ~input ~amount ~txid ~vout)
+  end
+
+let tx_of_inputs cfg inputs dest =
+  let value =
+    List.fold_left inputs ~init:0L ~f:(fun a { Input.amount } -> Int64.(a + amount)) in
+  (* this should be a good approximation of fees *)
+  let fees = cfg.Cfg.fees * (List.length inputs + 1) * tezos_input_size in
+  let spendable_value = Int64.(value - (of_int fees)) in
+  let script = Script.P2PKH.scriptPubKey dest in
+  let output = Transaction.Output.create ~value:spendable_value ~script in
+  let tx_inputs = List.map inputs ~f:(fun { Input.input } -> input) in
+  Transaction.create tx_inputs [output]
+
+let filename_of_tx now tx =
+  Caml.Format.asprintf "%a_%a"
+    (Ptime.pp_rfc3339 ~space:false ()) now
+    Hash.Hash32.pp tx.Transaction.hash
+
+let output_ledger_cfg outf tx inputs =
+  let open Out_channel in
+  let rawtxs = List.map inputs ~f:(fun { Input.tx } -> tx) in
+  let `Hex tx_hex = Transaction.to_hex tx in
+  with_file ~binary:true ~append:false outf ~f:begin fun oc ->
+    fprintf oc "rawTx = \"%s\"\n" tx_hex ;
+    output_string oc "keyPath = \"44'/0'/0'/0/0\"\n" ;
+    let prevtxs_str =
+      Caml.Format.asprintf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
+        (List.map rawtxs ~f:(fun ptx -> let `Hex ptx_hex = Hex.of_string ptx in ptx_hex)) in
+    output_string oc prevtxs_str
+  end
+
+let build_tx cfg loglevel max_size dest base_url =
   set_loglevel loglevel ;
   let cfg = Cfg.unopt cfg in
   let url = Uri.with_path base_url "getUtxos" in
-  let url = Uri.with_query' url ["limit", string_of_int max_size] in
+  let url = Uri.with_query' url ["limit", Int.to_string max_size] in
   let encoding = Json_encoding.(list Utxo.encoding) in
   safe_get ~encoding url >>= function
   | Error err -> Lwt.fail_with (Http.string_of_error err)
   | Ok utxos ->
-    Lwt_list.iter_s begin fun utxo ->
-      Lwt_log.debug_f "%s" (Utxo.show utxo)
-    end utxos >>= fun () ->
     let scriptRedeems = List.map utxos ~f:begin fun { Utxo.tx ; vout ; tezos_address } ->
         let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_address in
         scriptRedeem
       end in
-    let inputs =
-      List.map2 utxos scriptRedeems ~f:begin fun  { Utxo.tx = rawtx; vout } scriptRedeem ->
-        let tx = Transaction.of_bytes_exn rawtx in
-        Lwt_log.ign_debug_f "%s" (Transaction.show tx) ;
-        let outputs = Transaction.get_outputs tx in
-        let output = List.nth outputs vout in
-        let amount = Transaction.Output.get_value output in
-        let txid = Hash.Hash32.to_hex tx.hash in
-        let input = Transaction.Input.create
-            ~prev_out_hash:tx.hash ~prev_out_index:vout ~script:scriptRedeem () in
-        Input.create ~tx:rawtx ~input ~amount ~txid ~vout
-      end in
-    let value =
-      List.fold_left inputs ~init:0L ~f:begin fun a { Input.amount } ->
-        Int64.(add a amount)
-      end in
-    (* this should be a good approximation of fees *)
-    let fees = Cfg.fees * (List.length inputs + 1) * tezos_input_size in
-    let spendable_value = Int64.(rem value (of_int fees)) in
-    let script = Script.P2PKH.scriptPubKey dest in
-    let output = Transaction.Output.create ~value:spendable_value ~script in
-    let tx_inputs = List.map inputs ~f:(fun { Input.input } -> input) in
-    let rawtxs = List.map inputs ~f:(fun { Input.tx } -> tx) in
-    let tx = Transaction.create tx_inputs [output] in
-    let `Hex tx_hex = Transaction.to_hex tx in
-    Stdio.Out_channel.with_file ~binary:true ~append:false ~fail_if_exists:true outf ~f:begin fun oc ->
-      Stdio.Out_channel.fprintf oc "rawTx = \"%s\"\n" tx_hex ;
-      Stdio.Out_channel.output_string oc "keyPath = \"44'/0'/0'/0/0\"\n" ;
-      let prevtxs_str =
-        Caml.Format.asprintf "rawPrevTxs = [ %a ]@." pp_print_quoted_string_list
-          (List.map rawtxs ~f:(fun ptx -> let `Hex ptx_hex = Hex.of_string ptx in ptx_hex)) in
-      Stdio.Out_channel.output_string oc prevtxs_str
-    end ;
-    let url = Uri.with_path base_url "ackUtxos" in
-    let acks = List.map inputs ~f:Input.to_ack in
-    safe_post ~encoding:Json_encoding.(list Ack.encoding) url acks
+    let big, small = inputs_of_utxos_scripts_exn cfg utxos scriptRedeems in
+    begin match big with
+      | [] -> Lwt.return_unit
+      | inputs ->
+        Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
+        let tx = tx_of_inputs cfg big dest in
+        let now = Ptime_clock.now () in
+        let outf = filename_of_tx now tx in
+        output_ledger_cfg outf tx big ;
+        let url = Uri.with_path base_url "ackUtxos" in
+        let utxos = List.map big ~f:Input.to_ack in
+        let resp = Ack.accept ~txid:tx.hash ~utxos ~filename:outf in
+        safe_post ~encoding:Ack.encoding url resp >>= function
+        | Ok `Null -> Lwt.return_unit
+        | Error err ->
+          Lwt_log.error_f "%s" (Http.string_of_error err)
+    end >>= fun () ->
+    begin match small with
+      | [] -> Lwt.return_unit
+      | utxos ->
+        Lwt_log.info_f "Ignore %d inputs" (List.length utxos) >>= fun () ->
+        let url = Uri.with_path base_url "ackUtxos" in
+        let resp = Ack.reject ~utxos in
+        safe_post ~encoding:Ack.encoding url resp >>= function
+        | Ok `Null -> Lwt.return_unit
+        | Error err ->
+          Lwt_log.error_f "%s" (Http.string_of_error err)
+    end
 
-let build_tx cfg loglevel max_size dest outf base_url =
-  Lwt_main.run (build_tx cfg loglevel max_size dest outf base_url)
+let build_tx cfg loglevel max_size dest base_url =
+  Lwt_main.run (build_tx cfg loglevel max_size dest base_url)
 
 let cmd =
   let max_size =
@@ -237,12 +335,10 @@ let cmd =
     Arg.(value & (opt int 100) & info ~doc ["l" ; "limit"]) in
   let dest =
     Arg.(required & (pos 0 (some Conv.payment_addr) None & info [] ~docv:"DESTINATION_BTC_ADDRESS")) in
-  let outf =
-    Arg.(required & (pos 1 (some string) None & info [] ~docv:"TXFILE")) in
   let url =
-    Arg.(required & (pos 2 (some Conv.uri) None & info [] ~docv:"URL")) in
+    Arg.(required & (pos 1 (some Conv.uri) None & info [] ~docv:"URL")) in
   let doc = "Build a transaction from a Dynamo service." in
-  Term.(const build_tx $ cfg $ loglevel $ max_size $ dest $ outf $ url),
+  Term.(const build_tx $ cfg $ loglevel $ max_size $ dest $ url),
   Term.info ~doc "tx_of_dynamo"
 
 let () = match Term.eval cmd with
