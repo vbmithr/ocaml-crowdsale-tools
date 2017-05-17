@@ -38,9 +38,13 @@ module Cfg = struct
          (req "threshold" int)
          (req "fees" int))
 
-  let of_file fn =
+  let of_file_exn fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in
     Json_encoding.destruct encoding json
+
+  let of_file fn =
+    try Ok (of_file_exn fn) with exn ->
+      Error (Caml.Printexc.to_string exn)
 
   let to_ezjsonm cfg =
     Json_encoding.construct encoding cfg
@@ -52,7 +56,7 @@ module Cfg = struct
     Caml.Format.asprintf "%a" pp cfg
 
   let unopt = function
-    | None -> of_file default_location
+    | None -> of_file_exn default_location
     | Some cfg -> cfg
 end
 
@@ -68,9 +72,10 @@ let is_debug vs = List.length vs > 1
 
 module Cmdliner = struct
   module Conv = struct
+    open Rresult
     open Caml.Format
     let cfg =
-      (fun str -> try `Ok (Cfg.of_file str) with _ -> `Error "Cfg.of_file"),
+      (fun str -> R.to_presult (Cfg.of_file str)),
       (fun ppf _cfg -> pp_print_string ppf "<cfg>")
 
     let hex =
