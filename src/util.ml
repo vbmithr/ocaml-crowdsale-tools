@@ -123,12 +123,23 @@ let getpass =
   let open Ctypes in
   Foreign.foreign "getpass" (string @-> returning string)
 
-let getpass_confirm () =
-  let passwd = getpass "Enter passphrase: " in
-  let passwd_confirm = getpass "Confirm passphrase: " in
+let getpass_confirm topic =
+  let passwd = getpass ("Enter " ^ topic ^ ": ") in
+  let passwd_confirm = getpass ("Confirm " ^ topic ^ ": ") in
   if String.compare passwd passwd_confirm <> 0 then None else Some (passwd)
 
-let getpass () = getpass "Enter passphrase: "
+let getpass topic = getpass ("Enter " ^ topic ^ ": ")
+
+let getpass_confirm_clear topic =
+  Stdio.printf "Enter %s: %!" topic ;
+  let passwd = Stdio.In_channel.(input_line_exn stdin) in
+  Stdio.printf "Confirm %s: %!" topic ;
+  let passwd_confirm = Stdio.In_channel.(input_line_exn stdin) in
+  if String.compare passwd passwd_confirm <> 0 then None else Some (passwd)
+
+let getpass_clear topic =
+  Stdio.printf "Enter %s: %!" topic ;
+  Stdio.In_channel.(input_line_exn stdin)
 
 module User = struct
   type t = {

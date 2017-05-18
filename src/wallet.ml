@@ -95,23 +95,27 @@ let generate cfg ll json_out only_addrs n =
     | 2 -> loglevel := `Debug
     | _ -> loglevel := `Error
   end ;
-  match getpass_confirm () with
-  | None ->
-      prerr_endline "Passphrase do not match. Aborting." ;
+  match getpass_confirm "passphrase", getpass_confirm_clear "email" with
+  | None, _  ->
+      prerr_endline "Passphrase does not match. Aborting." ;
       Caml.exit 1
-  | Some passphrase ->
-      Random.stir () ;
-      let wallets = generate_n cfg passphrase n in
-      match json_out, only_addrs with
-      | true, _ ->
-        let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
-        printf "%s\n" ret
-      | _, true ->
-        List.iter wallets
-          ~f:(fun { tezos_addr } ->
-              printf "%s\n" (Base58.Tezos.show tezos_addr))
-      | _ ->
-        Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
+  | _, None  ->
+      prerr_endline "Email does not match. Aborting." ;
+      Caml.exit 1
+  | Some passphrase, Some email ->
+    Random.stir () ;
+    let secret = email ^ passphrase in
+    let wallets = generate_n cfg secret n in
+    match json_out, only_addrs with
+    | true, _ ->
+      let ret = Ezjsonm.to_string (`A (List.map ~f:Wallet.to_ezjsonm wallets)) in
+      printf "%s\n" ret
+    | _, true ->
+      List.iter wallets
+        ~f:(fun { tezos_addr } ->
+            printf "%s\n" (Base58.Tezos.show tezos_addr))
+    | _ ->
+      Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check cfg wordsfile =
   let mnemonic = match wordsfile with
@@ -123,8 +127,10 @@ let check cfg wordsfile =
   match mnemonic with
   | Some mnemonic when List.length mnemonic = 15 -> begin
     let cfg = Cfg.unopt cfg in
-    let passphrase = getpass () in
-    match Mnemonic.to_seed ~passphrase mnemonic with
+    let passphrase = getpass "passphrase" in
+    let email = getpass_clear "email" in
+    let secret = email ^  passphrase in
+    match Mnemonic.to_seed ~passphrase:secret mnemonic with
     | None ->
       prerr_endline "Provided mnemonic is invalid." ;
       Caml.exit 1
