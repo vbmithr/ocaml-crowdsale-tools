@@ -156,24 +156,22 @@ module Ack = struct
          (req "vout" int))
 
   type accepted = {
-    txid : Hex.t ;
+    timestamp : Ptime.t ;
     filename : string ;
-    blockhash: Hex.t option
   }
 
   let accepted_encoding =
     let open Json_encoding in
     conv
-      (fun { txid = `Hex txid ; filename ; blockhash } ->
-         let bh = Option.map blockhash ~f:(fun (`Hex bh) -> bh) in
-         (txid, filename, bh))
-      (fun (txid, filename, bh) ->
-         let blockhash = Option.map bh ~f:(fun bh_hex -> `Hex bh_hex) in
-         { txid = `Hex txid ; filename ; blockhash })
-      (obj3
-         (req "txid" string)
-         (req "filename" string)
-         (opt "blockhash" string))
+      (fun { timestamp ; filename } ->
+         let timestamp = Ptime.to_float_s timestamp in
+         (timestamp, filename))
+      (fun (timestamp, filename) ->
+         let timestamp = Option.value_exn (Ptime.of_float_s timestamp) in
+         { timestamp ; filename })
+      (obj2
+         (req "timestamp" float)
+         (req "filename" string))
 
   type meta =
     | Accepted of accepted
@@ -195,9 +193,9 @@ module Ack = struct
     meta : meta ;
   }
 
-  let accept ~txid ~utxos ~filename =
-    let txid = Hash.Hash32.to_hex txid in
-    let meta = Accepted { txid ; filename ; blockhash = None } in
+  let accept ~utxos ~filename =
+    let timestamp = Ptime_clock.now () in
+    let meta = Accepted { timestamp ; filename } in
     { utxos ; meta }
 
   let reject ~utxos = { utxos ; meta = Rejected }
@@ -266,10 +264,10 @@ let tx_of_inputs cfg inputs dest =
   let tx_inputs = List.map inputs ~f:(fun { Input.input } -> input) in
   Transaction.create tx_inputs [output]
 
-let filename_of_tx now tx =
-  Caml.Format.asprintf "%a_%a"
+let filename_of_tx now =
+  Caml.Format.asprintf "%.5f_%a"
+    (Ptime.to_float_s now)
     (Ptime.pp_rfc3339 ~space:false ()) now
-    Hash.Hash32.pp tx.Transaction.hash
 
 let output_ledger_cfg outf tx inputs =
   let open Out_channel in
@@ -290,6 +288,7 @@ let build_tx cfg loglevel max_size dest base_url =
   let url = Uri.with_path base_url "getUtxos" in
   let url = Uri.with_query' url ["limit", Int.to_string max_size] in
   let encoding = Json_encoding.(list Utxo.encoding) in
+  Lwt_log.debug_f "GET %s" (Uri.to_string url) >>= fun () ->
   safe_get ~encoding url >>= function
   | Error err -> Lwt.fail_with (Http.string_of_error err)
   | Ok utxos ->
@@ -304,11 +303,11 @@ let build_tx cfg loglevel max_size dest base_url =
         Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
         let tx = tx_of_inputs cfg big dest in
         let now = Ptime_clock.now () in
-        let outf = filename_of_tx now tx in
+        let outf = filename_of_tx now in
         output_ledger_cfg outf tx big ;
         let url = Uri.with_path base_url "ackUtxos" in
         let utxos = List.map big ~f:Input.to_ack in
-        let resp = Ack.accept ~txid:tx.hash ~utxos ~filename:outf in
+        let resp = Ack.accept ~utxos ~filename:outf in
         safe_post ~encoding:Ack.encoding url resp >>= function
         | Ok `Null -> Lwt.return_unit
         | Error err ->
