@@ -44,7 +44,8 @@ module Cfg = struct
 
   let of_file fn =
     try Ok (of_file_exn fn) with exn ->
-      Error (Caml.Printexc.to_string exn)
+      Error (Caml.Format.asprintf "Cfg.of_file: %a"
+               (Json_encoding.print_error ?print_unknown:None) exn)
 
   let to_ezjsonm cfg =
     Json_encoding.construct encoding cfg
