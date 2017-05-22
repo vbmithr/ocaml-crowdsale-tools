@@ -264,16 +264,11 @@ let tx_of_inputs cfg inputs dest =
   let tx_inputs = List.map inputs ~f:(fun { Input.input } -> input) in
   Transaction.create tx_inputs [output]
 
-let filename_of_tx now =
-  Caml.Format.asprintf "%.5f_%a"
-    (Ptime.to_float_s now)
-    (Ptime.pp_rfc3339 ~space:false ()) now
-
-let output_ledger_cfg outf tx inputs =
+let output_ledger_cfg fn tx inputs =
   let open Out_channel in
   let rawtxs = List.map inputs ~f:(fun { Input.tx } -> tx) in
   let `Hex tx_hex = Transaction.to_hex tx in
-  with_file ~binary:true ~append:false outf ~f:begin fun oc ->
+  Stdio.Out_channel.with_file ~binary:false ~append:false ~fail_if_exists:true fn ~f:begin fun oc ->
     fprintf oc "rawTx = \"%s\"\n" tx_hex ;
     output_string oc "keyPath = \"44'/0'/0'/0/0\"\n" ;
     let prevtxs_str =
@@ -282,7 +277,7 @@ let output_ledger_cfg outf tx inputs =
     output_string oc prevtxs_str
   end
 
-let build_tx cfg loglevel max_size dest base_url =
+let build_tx cfg loglevel max_size fn dest base_url =
   set_loglevel loglevel ;
   let cfg = Cfg.unopt cfg in
   let url = Uri.with_path base_url "getUtxos" in
@@ -302,12 +297,10 @@ let build_tx cfg loglevel max_size dest base_url =
       | inputs ->
         Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
         let tx = tx_of_inputs cfg big dest in
-        let now = Ptime_clock.now () in
-        let outf = filename_of_tx now in
-        output_ledger_cfg outf tx big ;
+        output_ledger_cfg fn tx big ;
         let url = Uri.with_path base_url "ackUtxos" in
         let utxos = List.map big ~f:Input.to_ack in
-        let resp = Ack.accept ~utxos ~filename:outf in
+        let resp = Ack.accept ~utxos ~filename:fn in
         safe_post ~encoding:Ack.encoding url resp >>= function
         | Ok `Null -> Lwt.return_unit
         | Error err ->
@@ -325,19 +318,21 @@ let build_tx cfg loglevel max_size dest base_url =
           Lwt_log.error_f "%s" (Http.string_of_error err)
     end
 
-let build_tx cfg loglevel max_size dest base_url =
-  Lwt_main.run (build_tx cfg loglevel max_size dest base_url)
+let build_tx cfg loglevel max_size fn dest base_url =
+  Lwt_main.run (build_tx cfg loglevel max_size fn dest base_url)
 
 let cmd =
   let max_size =
     let doc = "Maximum number of inputs for the transaction." in
     Arg.(value & (opt int 100) & info ~doc ["l" ; "limit"]) in
+  let outf =
+    Arg.(required & (pos 0 (some string) None & info [] ~docv:"OUT_FILE")) in
   let dest =
-    Arg.(required & (pos 0 (some Conv.payment_addr) None & info [] ~docv:"DESTINATION_BTC_ADDRESS")) in
+    Arg.(required & (pos 1 (some Conv.payment_addr) None & info [] ~docv:"DESTINATION_BTC_ADDRESS")) in
   let url =
-    Arg.(required & (pos 1 (some Conv.uri) None & info [] ~docv:"URL")) in
+    Arg.(required & (pos 2 (some Conv.uri) None & info [] ~docv:"URL")) in
   let doc = "Build a transaction from a Dynamo service." in
-  Term.(const build_tx $ cfg $ loglevel $ max_size $ dest $ url),
+  Term.(const build_tx $ cfg $ loglevel $ max_size $ outf $ dest $ url),
   Term.info ~doc "tx_of_dynamo"
 
 let () = match Term.eval cmd with
