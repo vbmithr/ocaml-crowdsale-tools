@@ -277,54 +277,67 @@ let output_ledger_cfg fn tx inputs =
     output_string oc prevtxs_str
   end
 
-let build_tx cfg loglevel max_size fn dest base_url =
+let build_tx cfg loglevel min_size max_size fn dest base_url =
   set_loglevel loglevel ;
+  let limit = 2 * max_size in
   let cfg = Cfg.unopt cfg in
   let url = Uri.with_path base_url "getUtxos" in
-  let url = Uri.with_query' url ["limit", Int.to_string max_size] in
+  let url = Uri.with_query' url ["limit", Int.to_string limit] in
   let encoding = Json_encoding.(list Utxo.encoding) in
-  Lwt_log.debug_f "GET %s" (Uri.to_string url) >>= fun () ->
-  safe_get ~encoding url >>= function
-  | Error err -> Lwt.fail_with (Http.string_of_error err)
-  | Ok utxos ->
-    let scriptRedeems = List.map utxos ~f:begin fun { Utxo.tx ; vout ; tezos_address } ->
-        let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_address in
-        scriptRedeem
-      end in
-    let big, small = inputs_of_utxos_scripts_exn cfg utxos scriptRedeems in
-    begin match big with
-      | [] -> Lwt.return_unit
-      | inputs ->
-        Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
-        let tx = tx_of_inputs cfg big dest in
-        output_ledger_cfg fn tx big ;
-        let url = Uri.with_path base_url "ackUtxos" in
-        let utxos = List.map big ~f:Input.to_ack in
-        let resp = Ack.accept ~utxos ~filename:fn in
-        safe_post ~encoding:Ack.encoding url resp >>= function
-        | Ok `Null -> Lwt.return_unit
-        | Error err ->
-          Lwt_log.error_f "%s" (Http.string_of_error err)
-    end >>= fun () ->
-    begin match small with
-      | [] -> Lwt.return_unit
-      | utxos ->
-        Lwt_log.info_f "Ignore %d inputs" (List.length utxos) >>= fun () ->
-        let url = Uri.with_path base_url "ackUtxos" in
-        let resp = Ack.reject ~utxos in
-        safe_post ~encoding:Ack.encoding url resp >>= function
-        | Ok `Null -> Lwt.return_unit
-        | Error err ->
-          Lwt_log.error_f "%s" (Http.string_of_error err)
-    end
+  let nak = function
+    | [] -> Lwt_log.info "No utxos rejected"
+    | utxos ->
+      Lwt_log.info_f "Reject %d utxos" (List.length utxos) >>= fun () ->
+      let url = Uri.with_path base_url "ackUtxos" in
+      let resp = Ack.reject ~utxos in
+      safe_post ~encoding:Ack.encoding url resp >>= function
+      | Ok `Null -> Lwt.return_unit
+      | Error err ->
+        Lwt_log.error_f "%s" (Http.string_of_error err) in
+  let ack = function
+    | [] -> Lwt_log.info "No inputs to ack"
+    | inputs ->
+      Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
+      let tx = tx_of_inputs cfg inputs dest in
+      output_ledger_cfg fn tx inputs ;
+      let url = Uri.with_path base_url "ackUtxos" in
+      let utxos = List.map inputs ~f:Input.to_ack in
+      let resp = Ack.accept ~utxos ~filename:fn in
+      safe_post ~encoding:Ack.encoding url resp >>= function
+      | Ok `Null -> Lwt.return_unit
+      | Error err ->
+        Lwt_log.error_f "%s" (Http.string_of_error err) in
+  let rec loop () =
+    Lwt_log.debug_f "GET %s" (Uri.to_string url) >>= fun () ->
+    safe_get ~encoding url >>= function
+    | Error err -> Lwt.fail_with (Http.string_of_error err)
+    | Ok utxos ->
+      let scriptRedeems = List.map utxos ~f:begin fun { Utxo.tx ; vout ; tezos_address } ->
+          let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_address in
+          scriptRedeem
+        end in
+      let inputs, rejected_utxos = inputs_of_utxos_scripts_exn cfg utxos scriptRedeems in
+      nak rejected_utxos >>= fun () ->
+      match List.(length inputs, length rejected_utxos) with
+      | nb_i, nb_o when nb_i < min_size && nb_i + nb_o = limit ->
+        Lwt_log.info "Not enough inputs for tx. Retrying." >>=
+        loop
+      | nb_i, nb_o when nb_i < min_size ->
+        Lwt_log.info "Not enough inputs for tx. Exiting."
+      | _ ->
+        ack (List.sub inputs ~pos:0 ~len:max_size) in
+  loop ()
 
-let build_tx cfg loglevel max_size fn dest base_url =
-  Lwt_main.run (build_tx cfg loglevel max_size fn dest base_url)
+let build_tx cfg loglevel min_size max_size fn dest base_url =
+  Lwt_main.run (build_tx cfg loglevel min_size max_size fn dest base_url)
 
 let cmd =
+  let min_size =
+    let doc = "Minimum number of inputs for the transaction." in
+    Arg.(value & (opt int 50) & info ~doc ["min"]) in
   let max_size =
     let doc = "Maximum number of inputs for the transaction." in
-    Arg.(value & (opt int 100) & info ~doc ["l" ; "limit"]) in
+    Arg.(value & (opt int 75) & info ~doc ["max"]) in
   let outf =
     Arg.(required & (pos 0 (some string) None & info [] ~docv:"OUT_FILE")) in
   let dest =
@@ -332,7 +345,7 @@ let cmd =
   let url =
     Arg.(required & (pos 2 (some Conv.uri) None & info [] ~docv:"URL")) in
   let doc = "Build a transaction from a Dynamo service." in
-  Term.(const build_tx $ cfg $ loglevel $ max_size $ outf $ dest $ url),
+  Term.(const build_tx $ cfg $ loglevel $ min_size $ max_size $ outf $ dest $ url),
   Term.info ~doc "tx_of_dynamo"
 
 let () = match Term.eval cmd with
