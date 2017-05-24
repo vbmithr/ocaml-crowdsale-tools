@@ -25,18 +25,19 @@ module Cfg = struct
       begin fun { pks ; addrs ; threshold ; fees } ->
         let pks = List.map pks
             ~f:(fun pk -> let `Hex pk_hex = Ec_public.to_hex pk in pk_hex) in
-        (pks, threshold, fees)
+        ((), (pks, threshold, fees))
       end
-      begin fun (pks, threshold, fees) ->
+      begin fun ((), (pks, threshold, fees)) ->
         let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
         let addrs =
           List.map pks ~f:Payment_address.of_point in
         { pks ; addrs ; threshold ; fees }
       end
+      (merge_objs unit
       (obj3
          (req "pks" (list string))
          (req "threshold" int)
-         (req "fees" int))
+         (req "fees" int)))
 
   let of_file_exn fn =
     let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in
