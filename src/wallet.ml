@@ -15,35 +15,42 @@ let loglevel = ref (`Error : loglevel)
 
 module Wallet = struct
   type t = {
-    mnemonic : string list ;
+    mnemonic : Bip39.t ;
     tezos_addr : Base58.Tezos.t ;
     payment_addr : Base58.Bitcoin.t ;
   }
 
+  let bip39_encoding =
+    let open Json_encoding in
+    let open Bip39 in
+    conv to_words (of_words ~lang:English) (list string)
+
+  let tezos_encoding =
+    let open Json_encoding in
+    let open Base58.Tezos in
+    conv to_string of_string_exn string
+
+  let bitcoin_encoding =
+    let open Json_encoding in
+    let open Base58.Bitcoin in
+    conv to_string of_string_exn string
+
   let encoding =
     let open Json_encoding in
     conv
-      (fun { mnemonic ; tezos_addr ; payment_addr } ->
-         Base58.(mnemonic, Tezos.to_string tezos_addr, Bitcoin.to_string payment_addr))
-      (fun (mnemonic, tezos_addr, payment_addr) ->
-         let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
-         let payment_addr = Base58.Bitcoin.of_string_exn payment_addr in
-         { mnemonic ; tezos_addr ; payment_addr })
+      (fun { mnemonic ; tezos_addr ; payment_addr } ->  (mnemonic, tezos_addr, payment_addr))
+      (fun (mnemonic, tezos_addr, payment_addr) -> { mnemonic ; tezos_addr ; payment_addr })
       (obj3
-         (req "mnemonic" (list string))
-         (req "tezos_pkh" string)
-         (req "payment_addr" string))
+         (req "mnemonic" bip39_encoding)
+         (req "tezos_pkh" tezos_encoding)
+         (req "payment_addr" bitcoin_encoding))
 
   let to_ezjsonm wallet = Json_encoding.construct encoding wallet
 
   let pp ppf { mnemonic ; tezos_addr ; payment_addr } =
     let open Caml.Format in
-    let pp_mnemonic =
-      pp_print_list
-        ~pp_sep:(fun fmt () -> fprintf fmt " ")
-        pp_print_string in
     fprintf ppf "%a@.%a@.%a"
-      pp_mnemonic mnemonic
+      Bip39.pp mnemonic
       Base58.Tezos.pp tezos_addr
       Base58.Bitcoin.pp payment_addr
 
@@ -74,10 +81,10 @@ let generate_seed cfg seed_bytes =
   tezos_addr, Payment_address.to_b58check addr
 
 let generate_one cfg passphrase =
-  let entropy = Random.Bytes.generate 20 in
-  let mnemonic = Mnemonic.of_entropy entropy in
+  let entropy = Random.Bigbytes.generate 20 in
+  let mnemonic = Bip39.of_entropy (Cstruct.of_bigarray entropy) in
   let seed_bytes =
-    String.subo ~len:32 (Mnemonic.to_seed_exn mnemonic ~passphrase) in
+    String.subo ~len:32 (Bip39.to_seed mnemonic ~passphrase) in
   let tezos_addr, payment_addr = generate_seed cfg seed_bytes in
   Wallet.{ mnemonic ; tezos_addr ; payment_addr }
 
@@ -129,16 +136,13 @@ let check cfg wordsfile =
     let cfg = Cfg.unopt cfg in
     let passphrase = getpass "passphrase" in
     let email = getpass_clear "email" in
-    let secret = email ^  passphrase in
-    match Mnemonic.to_seed ~passphrase:secret mnemonic with
-    | None ->
-      prerr_endline "Provided mnemonic is invalid." ;
-      Caml.exit 1
-    | Some seed_bytes ->
-      let tezos_addr, payment_addr =
-        generate_seed cfg (String.subo ~len:32 seed_bytes) in
-      let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
-      printf "%s\n" Wallet.(show wallet)
+    let secret = email ^ passphrase in
+    let mnemonic = Bip39.of_words mnemonic in
+    let seed_bytes = Bip39.to_seed ~passphrase:secret mnemonic in
+    let tezos_addr, payment_addr =
+      generate_seed cfg (String.subo ~len:32 seed_bytes) in
+    let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
+    printf "%s\n" Wallet.(show wallet)
   end
   | _ ->
     prerr_endline "Provided mnemonic must be 15 words." ;
