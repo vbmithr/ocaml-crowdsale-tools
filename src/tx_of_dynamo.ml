@@ -234,23 +234,27 @@ module Input = struct
   let to_ack { txid ; vout } = Ack.create ~txid ~vout
 end
 
-let inputs_of_utxos_scripts_exn cfg utxos scriptRedeems =
+let inputs_of_utxos_scripts_exn cfg utxos scriptRedeems max_value =
   let minimal_input_amount = Int64.of_int (cfg.Cfg.fees * tezos_input_size) in
   Lwt_log.ign_debug_f "Not including utxos with less than %Ld sats" minimal_input_amount ;
   let utxos_scripts = List.zip_exn utxos scriptRedeems in
-  List.partition_map utxos_scripts ~f:begin fun ({ Utxo.tx = rawtx; vout }, scriptRedeem) ->
+  List.fold_left utxos_scripts
+    ~init:(0, [], [])
+    ~f:begin fun (cur_value, acked, nacked) ({ Utxo.tx = rawtx; vout }, scriptRedeem) ->
     let tx = Transaction.of_bytes_exn rawtx in
     Lwt_log.ign_debug_f "%s" (Transaction.show tx) ;
     let outputs = Transaction.get_outputs tx in
     let output = List.nth_exn outputs vout in
     let amount = Transaction.Output.get_value output in
     let txid = Hash.Hash32.to_hex tx.hash in
-    match Int64.(amount <= minimal_input_amount) with
-    | true -> `Snd (Ack.create ~txid ~vout)
-    | false ->
+    match cur_value >= max_value, Int64.(amount <= minimal_input_amount) with
+    | true, _
+    | _, true ->
+      cur_value, acked, (Ack.create ~txid ~vout :: nacked)
+    | _ ->
       let input = Transaction.Input.create
           ~prev_out_hash:tx.hash ~prev_out_index:vout ~script:scriptRedeem () in
-      `Fst (Input.create ~tx:rawtx ~input ~amount ~txid ~vout)
+      cur_value + vout, (Input.create ~tx:rawtx ~input ~amount ~txid ~vout) :: acked, nacked
   end
 
 let tx_of_inputs cfg inputs dest =
@@ -277,7 +281,10 @@ let output_ledger_cfg fn tx inputs =
     output_string oc prevtxs_str
   end
 
-let build_tx cfg loglevel min_size max_size fn dest base_url =
+exception HTTP_Error
+exception No_inputs_to_ack
+
+let build_tx cfg loglevel min_size max_size fn dest max_value base_url =
   set_loglevel loglevel ;
   let limit = 2 * max_size in
   let cfg = Cfg.unopt cfg in
@@ -295,28 +302,37 @@ let build_tx cfg loglevel min_size max_size fn dest base_url =
       | Error err ->
         Lwt_log.error_f "%s" (Http.string_of_error err) in
   let ack = function
-    | [] -> Lwt_log.info "No inputs to ack"
+    | [] ->
+      Lwt_log.info "No inputs to ack" >>= fun () ->
+      Lwt.fail No_inputs_to_ack
+
     | inputs ->
       Lwt_log.info_f "Ack %d inputs" (List.length inputs) >>= fun () ->
       let tx = tx_of_inputs cfg inputs dest in
-      output_ledger_cfg fn tx inputs ;
       let url = Uri.with_path base_url "ackUtxos" in
       let utxos = List.map inputs ~f:Input.to_ack in
       let resp = Ack.accept ~utxos ~filename:fn in
       safe_post ~encoding:Ack.encoding url resp >>= function
-      | Ok `Null -> Lwt.return_unit
       | Error err ->
-        Lwt_log.error_f "%s" (Http.string_of_error err) in
+        Lwt_log.error_f "%s" (Http.string_of_error err) >>= fun () ->
+        Lwt.fail HTTP_Error
+      | Ok `Null ->
+        output_ledger_cfg fn tx inputs ;
+        Lwt.return_unit
+  in
   let rec loop () =
     Lwt_log.debug_f "GET %s" (Uri.to_string url) >>= fun () ->
     safe_get ~encoding url >>= function
-    | Error err -> Lwt.fail_with (Http.string_of_error err)
+    | Error err ->
+      Lwt_log.error (Http.string_of_error err) >>= fun () ->
+      Lwt.fail HTTP_Error
     | Ok utxos ->
       let scriptRedeems = List.map utxos ~f:begin fun { Utxo.tx ; vout ; tezos_address } ->
           let { User.scriptRedeem } = User.of_tezos_addr ~cfg tezos_address in
           scriptRedeem
         end in
-      let inputs, rejected_utxos = inputs_of_utxos_scripts_exn cfg utxos scriptRedeems in
+      let value_sats, inputs, rejected_utxos =
+        inputs_of_utxos_scripts_exn cfg utxos scriptRedeems max_value in
       nak rejected_utxos >>= fun () ->
       match List.(length inputs, length rejected_utxos) with
       | nb_i, nb_o when nb_i < min_size && nb_i + nb_o = limit ->
@@ -326,28 +342,35 @@ let build_tx cfg loglevel min_size max_size fn dest base_url =
         Lwt_log.info "Not enough inputs for tx. Exiting."
       | _ ->
         ack (List.sub inputs ~pos:0 ~len:max_size) in
-  loop ()
 
-let build_tx cfg loglevel min_size max_size fn dest base_url =
-  Lwt_main.run (build_tx cfg loglevel min_size max_size fn dest base_url)
+  Lwt.catch loop begin function
+    | HTTP_Error -> Caml.exit 1
+    | No_inputs_to_ack -> Caml.exit 2
+    | exn -> Caml.exit 3
+  end
+
+let build_tx cfg loglevel min_size max_size fn dest max_value base_url =
+  Lwt_main.run (build_tx cfg loglevel min_size max_size fn dest max_value base_url)
 
 let cmd =
   let min_size =
     let doc = "Minimum number of inputs for the transaction." in
-    Arg.(value & (opt int 50) & info ~doc ["min"]) in
+    Arg.(value & (opt int 50) & info ~doc ["min" ; "min-inputs"]) in
   let max_size =
     let doc = "Maximum number of inputs for the transaction." in
-    Arg.(value & (opt int 75) & info ~doc ["max"]) in
+    Arg.(value & (opt int 75) & info ~doc ["max" ; "max-inputs"]) in
   let outf =
     Arg.(required & (pos 0 (some string) None & info [] ~docv:"OUT_FILE")) in
   let dest =
     Arg.(required & (pos 1 (some Conv.payment_addr) None & info [] ~docv:"DESTINATION_BTC_ADDRESS")) in
+  let max_value =
+    Arg.(required & (pos 2 (some int) None) & info [] ~docv:"SATOSHIS_AMOUNT") in
   let url =
-    Arg.(required & (pos 2 (some Conv.uri) None & info [] ~docv:"URL")) in
+    Arg.(required & (pos 3 (some Conv.uri) None & info [] ~docv:"URL")) in
   let doc = "Build a transaction from a Dynamo service." in
-  Term.(const build_tx $ cfg $ loglevel $ min_size $ max_size $ outf $ dest $ url),
+  Term.(const build_tx $ cfg $ loglevel $ min_size $ max_size $ outf $ dest $ max_value $ url),
   Term.info ~doc "tx_of_dynamo"
 
 let () = match Term.eval cmd with
-  | `Error _ -> Caml.exit 1
+  | `Error _ -> Caml.exit 10
   | #Term.result -> Caml.exit 0
