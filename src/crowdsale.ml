@@ -7,6 +7,7 @@ open Lwt.Infix
 open Libbitcoin
 open Blockexplorer
 open Blockexplorer.Types
+module BL = Blockexplorer_lwt
 
 open Util
 open Util.Cmdliner
@@ -361,6 +362,56 @@ let gen_config =
   Term.(const gen_config $ loglevel $ threshold $ pks),
   Term.info ~doc "gen-config"
 
+let post_mortem loglevel cfg fn =
+  set_loglevel loglevel ;
+  let cfg = Cfg.unopt cfg in
+  let tx1s = Stdio.In_channel.read_lines fn in
+  let tx1s = List.map tx1s ~f:begin fun tz1 ->
+      User.of_tezos_addr ~cfg (Base58.Tezos.of_string_exn tz1)
+    end in
+  let tx1s = List.groupi tx1s ~break:(fun i _ _ -> i % 100 = 0) in
+  let on_vout addrs ({ n; value;
+                 spentTxId; spentIndex; spentHeight;
+                 scriptPubKey = { addresses; asm; hex; typ } } : Tx.Vout.t) =
+    let addrs' = Base58.Bitcoin.Set.of_list addresses in
+    if not Base58.Bitcoin.Set.(is_empty (inter addrs addrs'))
+       && value < 5_000_000 && value >= 1_000_000 then
+      Caml.Format.printf "%a %f@."
+        Base58.Bitcoin.pp (Base58.Bitcoin.Set.min_elt addrs')
+        Float.(of_int value / 1e8)
+  in
+  let on_tx addrs ({ txid; version; isCoinbase; size;
+                     time; locktime; confirmations; valueIn;
+                     valueOut; fees; blockheight;
+                     blocktime; blockhash; vin; vout } : Tx.t) =
+    List.iter vout ~f:(on_vout addrs)
+  in
+  let on_batch i batch =
+    Lwt_log.info_f "Processing batch %d" i >>= fun () ->
+    let addrs = List.map batch ~f:begin fun { User.payment_address } ->
+        payment_address
+      end in
+    let rec loop () =
+      BL.all_tx_by_addrs addrs >>= function
+      | Error err ->
+        Lwt_log.error (Http.string_of_error err) >>= fun () ->
+        Lwt_unix.sleep 5. >>=
+        loop
+      | Ok txs ->
+        let addrs = Base58.Bitcoin.Set.of_list addrs in
+        List.iter txs ~f:(on_tx addrs) ;
+        Lwt.return_unit in
+    loop () in
+  let run () = Lwt_list.iteri_s on_batch tx1s in
+  Lwt_main.run (run ())
+
+let post_mortem =
+  let doc = "Find discarded contributions." in
+  let fn =
+    Arg.(required & (pos 0 (some file) None & info [] ~docv:"TX1_FILE")) in
+  Term.(const post_mortem $ loglevel $ cfg $ fn),
+  Term.info ~doc "post-mortem"
+
 let default_cmd =
   let doc = "Crowdsale tools." in
   Term.(ret (const (`Help (`Pager, None)))),
@@ -372,6 +423,8 @@ let cmds = [
   prepare_multisig ;
   describe_multisig ;
   finalize_multisig ;
+
+  post_mortem ;
 ]
 
 let () = match Term.eval_choice default_cmd cmds with
