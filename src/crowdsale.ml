@@ -362,14 +362,15 @@ let gen_config =
   Term.(const gen_config $ loglevel $ threshold $ pks),
   Term.info ~doc "gen-config"
 
-let post_mortem loglevel cfg fn =
+let post_mortem loglevel cfg fn size =
   set_loglevel loglevel ;
   let cfg = Cfg.unopt cfg in
   let tx1s = Stdio.In_channel.read_lines fn in
   let tx1s = List.map tx1s ~f:begin fun tz1 ->
       User.of_tezos_addr ~cfg (Base58.Tezos.of_string_exn tz1)
     end in
-  let tx1s = List.groupi tx1s ~break:(fun i _ _ -> i % 100 = 0) in
+  let total_nb_tz1s = List.length tx1s in
+  let tx1s = List.groupi tx1s ~break:(fun i _ _ -> i % size = 0) in
   let on_vout addrs ({ n; value;
                  spentTxId; spentIndex; spentHeight;
                  scriptPubKey = { addresses; asm; hex; typ } } : Tx.Vout.t) =
@@ -387,7 +388,6 @@ let post_mortem loglevel cfg fn =
     List.iter vout ~f:(on_vout addrs)
   in
   let on_batch i batch =
-    Lwt_log.info_f "Processing batch %d" i >>= fun () ->
     let addrs = List.map batch ~f:begin fun { User.payment_address } ->
         payment_address
       end in
@@ -398,6 +398,10 @@ let post_mortem loglevel cfg fn =
         Lwt_unix.sleep 5. >>=
         loop
       | Ok txs ->
+        let nb_txs = List.length txs in
+        Lwt_log.info_f
+          "Processing batch %d (%d/%d TZ1s), %d txs found"
+          i ((i+1)*size) total_nb_tz1s nb_txs >>= fun () ->
         let addrs = Base58.Bitcoin.Set.of_list addrs in
         List.iter txs ~f:(on_tx addrs) ;
         Lwt.return_unit in
@@ -407,9 +411,12 @@ let post_mortem loglevel cfg fn =
 
 let post_mortem =
   let doc = "Find discarded contributions." in
+  let size =
+    let doc = "TZ1 batch size." in
+    Arg.(value & (opt int 100) & info ~doc ["batch-size"]) in
   let fn =
     Arg.(required & (pos 0 (some file) None & info [] ~docv:"TX1_FILE")) in
-  Term.(const post_mortem $ loglevel $ cfg $ fn),
+  Term.(const post_mortem $ loglevel $ cfg $ fn $ size),
   Term.info ~doc "post-mortem"
 
 let default_cmd =
