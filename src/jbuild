@@ -2,4 +2,4 @@
  ((names (wallet crowdsale obx tx_of_dynamo))
   (public_names (wallet crowdsale obx tx_of_dynamo))
   (preprocess (pps (ppx_sexp_conv)))
-  (libraries (base stdio cmdliner bip39 toml ptime.clock.os ocplib-json-typed hex sodium libbitcoin blockexplorer.lwt))))
+  (libraries (base stdio cmdliner bip39 toml ptime.clock.os ocplib-json-typed hex sodium libbitcoin blockexplorer-lwt))))
