@@ -1,69 +1,66 @@
 open Lwt.Infix
 open Cmdliner
-open Libbitcoin
 open Blockexplorer
 open Blockexplorer_lwt
 open Util
 open Util.Cmdliner
 
-let blk_decode loglevel binary blk =
+open Bitcoin.Protocol
+
+let blk_decode loglevel blk =
   set_loglevel loglevel ;
-  let blk = match blk, binary with
-    | None, false -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
-    | None, true -> Stdio.In_channel.(input_line_exn stdin)
-    | Some blk, false -> Hex.to_string (`Hex blk)
-    | Some blk, true -> blk
+  let blk = match blk with
+    | None -> Hex.to_cstruct (`Hex Stdio.In_channel.(input_line_exn stdin))
+    | Some blk -> blk
   in
-  match Block.of_bytes blk with
-  | None -> prerr_endline "Unable to decode"
-  | Some block -> Caml.Format.printf "%a@." Block.pp block
+  let block, _cs = Block.of_cstruct blk in
+  Caml.Format.printf "%a@." Block.pp block
 
 let blk_decode =
   let doc = "Decode a block in binary or Base16 format." in
-  let binary =
-    let doc = "Block is in binary format." in
-    Arg.(value & flag & info ["b" ; "binary"] ~doc) in
+  (* let binary =
+   *   let doc = "Block is in binary format." in
+   *   Arg.(value & flag & info ["b" ; "binary"] ~doc) in *)
   let blk =
-    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"BLOCK") in
-  Term.(const blk_decode $ loglevel $ binary $ blk),
+    Arg.(value & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"BLOCK") in
+  Term.(const blk_decode $ loglevel $ blk),
   Term.info ~doc "blk-decode"
 
 let tx_decode loglevel tx =
   set_loglevel loglevel ;
   let tx = match tx with
-    | None -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
+    | None -> Hex.to_cstruct (`Hex Stdio.In_channel.(input_line_exn stdin))
     | Some tx -> tx in
-  match Transaction.of_hex (Hex.of_string tx) with
-  | None -> prerr_endline "Unable to decode"
-  | Some tx -> Caml.Format.printf "%a@." Transaction.pp tx
+  let tx, _cs = Transaction.of_cstruct tx in
+  Caml.Format.printf "%a@." Transaction.pp tx
 
 let tx_decode =
   let doc = "Decode a Base16 transaction." in
   let tx =
-    Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
+    Arg.(value & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"TX") in
   Term.(const tx_decode $ loglevel $ tx),
   Term.info ~doc "tx-decode"
 
-let script_decode loglevel rawscript =
-  set_loglevel loglevel ;
-  match Script.of_hex (`Hex rawscript) with
-  | None -> prerr_endline "Unable to decode"
-  | Some script -> Caml.Format.printf "%a@." Script.pp script
+(* let script_decode loglevel rawscript =
+ *   set_loglevel loglevel ;
+ *   match Script.of_hex (`Hex rawscript) with
+ *   | None -> prerr_endline "Unable to decode"
+ *   | Some script -> Caml.Format.printf "%a@." Script.pp script
+ * 
+ * let script_decode =
+ *   let doc = "Decode a script to plain text tokens." in
+ *   let script =
+ *     Arg.(required & (pos 0 (some string) None) & info [] ~docv:"SCRIPT") in
+ *   Term.(const script_decode $ loglevel $ script),
+ *   Term.info ~doc "script-decode" *)
 
-let script_decode =
-  let doc = "Decode a script to plain text tokens." in
-  let script =
-    Arg.(required & (pos 0 (some string) None) & info [] ~docv:"SCRIPT") in
-  Term.(const script_decode $ loglevel $ script),
-  Term.info ~doc "script-decode"
-
-let tx_broadcast loglevel testnet rawtx_bytes =
+let tx_broadcast loglevel network rawtx_bytes =
   set_loglevel loglevel ;
   let rawtx_bytes = match rawtx_bytes with
     | None -> Hex.to_string (`Hex Stdio.In_channel.(input_line_exn stdin))
     | Some tx -> tx in
   let run () =
-    broadcast_tx ~testnet rawtx_bytes >>= function
+    broadcast_tx ~network rawtx_bytes >>= function
     | Ok (`Hex txid) -> Lwt_log.info txid
     | Error err -> Lwt_log.error (Http.string_of_error err) in
   Lwt_main.run (run ())
@@ -72,20 +69,18 @@ let tx_broadcast =
   let doc = "Broadcast a transaction with blockexplorer.com API." in
   let tx =
     Arg.(value & (pos 0 (some Conv.hex) None) & info [] ~docv:"TX") in
-  Term.(const tx_broadcast $ loglevel $ testnet $ tx),
+  Term.(const tx_broadcast $ loglevel $ network $ tx),
   Term.info ~doc "tx-broadcast"
 
-let tx_fetch loglevel testnet txid =
+let tx_fetch loglevel network txid =
   set_loglevel loglevel ;
   let run () =
-    rawtx ~testnet (Hex.of_string txid) >>= function
+    rawtx ~network (Hex.of_string txid) >>= function
     | Error err -> Lwt_log.error (Http.string_of_error err)
     | Ok t -> begin
-        match Transaction.of_bytes t with
-        | None -> Lwt_log.error "Unable to decode raw transaction"
-        | Some tx ->
-          let tx_decoded = Caml.Format.asprintf "%a" Transaction.pp tx in
-          Lwt_log.info tx_decoded
+        let tx, _cs = Transaction.of_cstruct (Cstruct.of_string t) in
+        let tx_decoded = Caml.Format.asprintf "%a" Transaction.pp tx in
+        Lwt_log.info tx_decoded
       end in
   Lwt_main.run (run ())
 
@@ -93,67 +88,90 @@ let tx_fetch =
   let doc = "Fetch a transaction from blockexplorer.com API." in
   let txid =
     Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"TXID") in
-  Term.(const tx_fetch $ loglevel $ testnet $ txid),
+  Term.(const tx_fetch $ loglevel $ network $ txid),
   Term.info ~doc "tx-fetch"
 
-let ec_to_wif loglevel uncompressed testnet ec =
+let ec_to_wif loglevel uncompressed testnet secret =
+  let open Bitcoin.Wallet in
+  let secret =
+    Secp256k1.Secret.of_bytes_exn ctx secret.Cstruct.buffer in
   let compress = not uncompressed in
-  Printf.printf "%s\n"
-    Ec_private.(of_secret ~compress ~testnet (Ec_secret.of_bytes ec) |> to_wif)
+  let wif = WIF.create ~testnet ~compress secret in
+  Format.printf "%a@." WIF.pp wif
 
 let ec_to_wif =
-  let doc = "Convert an EC private key to a WIF private key." in
+  let doc = "Encode an secp256k1 private key to WIF format." in
   let uncompressed =
     let doc = "Associate the result with the uncompressed public key format." in
     Arg.(value & flag & info ["u" ; "uncompressed"] ~doc) in
   let ec =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"EC_PRIVATE _KEY") in
+    Arg.(required & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"BYTES") in
   Term.(const ec_to_wif $ loglevel $ uncompressed $ testnet $ ec),
   Term.info ~doc "ec-to-wif"
 
-let ec_to_public loglevel uncompressed testnet ec =
+let ec_to_public loglevel uncompressed secret =
+  let open Bitcoin.Wallet in
   let compress = not uncompressed in
-  let `Hex ec_public_hex =
-    Ec_private.(of_secret ~compress ~testnet (Ec_secret.of_bytes ec) |>
-                Ec_public.of_private |> Ec_public.to_hex) in
-    Printf.printf "%s\n" ec_public_hex
+  let secret =
+    Secp256k1.Secret.of_bytes_exn ctx secret.Cstruct.buffer in
+  let public =
+    Secp256k1.Public.of_secret ctx secret in
+  let public_bytes =
+    Secp256k1.Public.to_bytes ~compress ctx public |> Cstruct.of_bigarray in
+  let `Hex ec_public_hex = Hex.of_cstruct public_bytes in
+  Printf.printf "%s\n" ec_public_hex
 
 let ec_to_public =
-  let doc = "Derive the EC public key of an EC private key." in
+  let doc = "Derive the secp256k1 public key of a secp256k1 private key." in
   let uncompressed =
     let doc = "Associate the result with the uncompressed public key format." in
     Arg.(value & flag & info ["u" ; "uncompressed"] ~doc) in
   let ec =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"EC_PRIVATE_KEY") in
-  Term.(const ec_to_public $ loglevel $ uncompressed $ testnet $ ec),
+    Arg.(required & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"BYTES") in
+  Term.(const ec_to_public $ loglevel $ uncompressed $ ec),
   Term.info ~doc "ec-to-public"
 
-let ec_to_address loglevel testnet ec =
-  let ec = Ec_public.of_bytes_exn ec in
-  let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-  let addr_b58 = (Payment_address.of_point ~version ec |> Payment_address.to_b58check) in
-  Format.printf "%a@." Base58.Bitcoin.pp addr_b58
+let ec_to_address loglevel testnet pk =
+  let public = Secp256k1.Public.of_bytes_exn ctx pk.Cstruct.buffer in
+  let addr = Bitcoin.Wallet.Address.of_pubkey ~testnet ctx public in
+  Format.printf "%a@." Base58.Bitcoin.pp addr
 
 let ec_to_address =
   let doc = "Convert an EC public key to a payment address." in
   let ec =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"EC_PUBLIC_KEY") in
+    Arg.(required & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"EC_PUBLIC_KEY") in
   Term.(const ec_to_address $ loglevel $ testnet $ ec),
   Term.info ~doc "ec-to-address"
 
-let ec_compress loglevel testnet pubkey =
-  let pubkey = Ec_public.of_uncomp_point_exn pubkey in
-  let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-  let addr = Payment_address.of_point ~version pubkey in
-  Format.printf "%a@.%a@."
-    Ec_public.pp pubkey Payment_address.pp addr
+let ec_compress loglevel testnet pk =
+  let public = Secp256k1.Public.of_bytes_exn ctx pk.Cstruct.buffer in
+  let `Hex pk_hex =
+    Secp256k1.Public.to_bytes ctx public |> Cstruct.of_bigarray |> Hex.of_cstruct in
+  let addr = Bitcoin.Wallet.Address.of_pubkey ~testnet ctx public in
+  Format.printf "%s@.%a@." pk_hex Base58.Bitcoin.pp addr
 
 let ec_compress =
   let doc = "Convert an EC public key to a payment address." in
   let ec =
-    Arg.(required & (pos 0 (some Conv.hex) None) & info [] ~docv:"UNCOMPRESSED_EC_PUBLIC_KEY") in
+    Arg.(required & (pos 0 (some Conv.hex_cstruct) None) & info [] ~docv:"UNCOMPRESSED_EC_PUBLIC_KEY") in
   Term.(const ec_compress $ loglevel $ testnet $ ec),
   Term.info ~doc "ec-compress"
+
+let get_wallet_pubkey path =
+  let open Ledgerwallet in
+  let h = Hidapi.hid_open ~vendor_id ~product_id in
+  let { Public_key.uncompressed } = get_wallet_public_key h path in
+  let pk = Secp256k1.Public.of_bytes_exn ctx uncompressed.Cstruct.buffer in
+  let addr = Bitcoin.Wallet.Address.of_pubkey ctx pk in
+  let addr_testnet = Bitcoin.Wallet.Address.of_pubkey ~testnet:true ctx pk in
+  Base58.Bitcoin.(Format.printf "%a@.%a@." pp addr pp addr_testnet)
+
+let get_wallet_pubkey =
+  let doc = "Get Ledger pubkey from a BIP44 path." in
+  let path =
+    Arg.(required & (pos 0 (some Conv.path) None) & info [] ~docv:"BIP44_PATH") in
+  Term.(const get_wallet_pubkey $ path),
+  Term.info ~doc "ledger-get-wallet-pubkey"
 
 let default_cmd =
   let doc = "Bitcoin tools." in
@@ -168,8 +186,9 @@ let cmds = [
   tx_decode ;
   tx_fetch ;
   tx_broadcast ;
-  script_decode ;
+  (* script_decode ; *)
   blk_decode ;
+  get_wallet_pubkey ;
 ]
 
 let () = match Term.eval_choice default_cmd cmds with

@@ -1,88 +1,13 @@
 open Base
-open Libbitcoin
+open Secp256k1
+open Bitcoin.Wallet
 
-module Cfg = struct
-  let default_location =
-    Caml.Filename.concat (Unix.getenv "HOME") ".tezos-crowdsale"
-  let threshold = 2
-  let fees = 200
-
-  type t = {
-    testnet : bool ;
-    sks : Ec_private.t list ;
-    pks : Ec_public.t list ;
-    addrs : Payment_address.t list ;
-    threshold : int ;
-    fees : int ;
-  }
-
-  let of_pks ?(testnet=false) pks =
-    let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-    let sks = [] in
-    let pks = List.map pks ~f:Ec_public.of_bytes_exn in
-    let addrs =
-      List.map pks ~f:(Payment_address.of_point ~version) in
-    { testnet ; sks ; pks ; addrs ;
-      threshold ; fees }
-
-  let of_sks ?(testnet=false) sks =
-    let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-    let sks = List.map ~f:Ec_private.of_wif_exn sks in
-    let pks = List.map sks ~f:Ec_public.of_private in
-    let addrs =
-      List.map pks ~f:(Payment_address.of_point ~version) in
-    { testnet ; sks ; pks ; addrs ;
-      threshold ; fees }
-
-  let encoding =
-    let open Json_encoding in
-    conv
-      begin fun { testnet ; sks ; pks ; addrs ; threshold ; fees } ->
-        let sks = List.map sks ~f:Ec_private.to_wif in
-        let pks = List.map pks
-            ~f:(fun pk -> let `Hex pk_hex = Ec_public.to_hex pk in pk_hex) in
-        (testnet, sks, pks, threshold, fees)
-      end
-      begin fun (testnet, sks, pks, threshold, fees) ->
-        let version = Base58.Bitcoin.(if testnet then Testnet_P2PKH else P2PKH) in
-        if List.length sks > 0 then begin
-          let sks = List.map sks ~f:(Ec_private.of_wif_exn ~testnet) in
-          let pks = List.map sks ~f:Ec_public.of_private in
-          let addrs =
-            List.map pks ~f:(Payment_address.of_point ~version) in
-          { testnet ; sks ; pks ; addrs ; threshold ; fees }
-        end
-        else begin
-          let pks = List.map pks ~f:(fun pk -> Ec_public.of_hex_exn (`Hex pk)) in
-          let addrs =
-            List.map pks ~f:(Payment_address.of_point ~version) in
-          { testnet ; sks = [] ; pks ; addrs ; threshold ; fees }
-        end
-      end
-      (obj5
-         (dft "testnet" bool false)
-         (dft "sks" (list string) [])
-         (dft "pks" (list string) [])
-         (dft "threshold" int threshold)
-         (dft "fees" int fees))
-
-  let of_file fn =
-    let json = Ezjsonm.from_channel (Stdio.In_channel.create fn) in
-    Json_encoding.destruct encoding json
-
-  let to_ezjsonm cfg =
-    Json_encoding.construct encoding cfg
-
-  let pp ppf cfg =
-    Json_repr.(pp ~compact:false (module Ezjsonm) ppf (to_ezjsonm cfg))
-
-  let to_string cfg =
-    Caml.Format.asprintf "%a" pp cfg
-
-  let unopt = function
-    | None -> of_file default_location
-    | Some cfg -> cfg
-end
+let ctx = Context.create []
+let pk1 = Public.of_bytes_exn ctx (Hex.to_cstruct (`Hex "04e8f164c9c12b039d3e522aa291e3544ddc99240a878080669aee1c359f66d253793af56acd2af002bf7038570913ed5092328ef2940ce3cedaa7c1801174e50e")).buffer
+let pk2 = Public.of_bytes_exn ctx (Hex.to_cstruct (`Hex "04c6ad7f526553affb3979483dac278b1517199a5ac3cd0fbb669644aadbf933bafb53bc3ef4687b32399e8fae8444800231bf84cd41442c24abfc58c05ba77a75")).buffer
+let fees_per_byte = 400
+let vendor_id = 0x2C97
+let product_id = 0x0001
 
 let set_loglevel vs =
   let level = match List.length vs with
@@ -97,16 +22,20 @@ let is_debug vs = List.length vs > 1
 module Cmdliner = struct
   module Conv = struct
     open Caml.Format
-    let cfg =
-      (fun str -> try `Ok (Cfg.of_file str) with _ -> `Error "Cfg.of_file"),
-      (fun ppf _cfg -> pp_print_string ppf "<cfg>")
-
     let hex =
       (fun str ->
          try `Ok (Hex.to_string (`Hex str))
          with _ ->`Error (sprintf "Hex expected, got %s" str)),
       (fun ppf hex ->
          let `Hex hex_str = Hex.of_string hex in
+         fprintf ppf "%s" hex_str)
+
+    let hex_cstruct =
+      (fun str ->
+         try `Ok (Hex.to_cstruct (`Hex str))
+         with _ ->`Error (sprintf "Hex expected, got %s" str)),
+      (fun ppf hex ->
+         let `Hex hex_str = Hex.of_cstruct hex in
          fprintf ppf "%s" hex_str)
 
     let tezos_addr =
@@ -122,13 +51,23 @@ module Cmdliner = struct
          | Some addr -> `Ok addr
          | None -> `Error (sprintf "Bitcoin multisig address expected, got %s" str)),
       Base58.Bitcoin.pp
+
+    let path =
+      (fun str ->
+         match Bitcoin.Wallet.KeyPath.of_string str with
+         | Some path -> `Ok path
+         | None -> `Error (sprintf "Key path expected, got %s" str)),
+      Bitcoin.Wallet.KeyPath.pp
+
+    let network =
+      let open Blockexplorer_lwt in
+      (fun str ->
+         try `Ok (network_of_string str) with _ ->
+           `Error (Printf.sprintf "Network expected, got %s" str)),
+      network_pp
   end
 
   open Cmdliner
-  let cfg =
-    let doc = "Configuration file to use." in
-    Arg.(value & opt (some Conv.cfg) None & info ["c" ; "cfg"] ~doc)
-
   let loglevel =
     let doc = "Print more debug messages. Can be repeated." in
     Arg.(value & flag_all & info ["v"] ~doc)
@@ -136,6 +75,10 @@ module Cmdliner = struct
   let testnet =
     let doc = "Use Bitcoin testnet." in
     Arg.(value & flag & info ["t" ; "testnet"] ~doc)
+
+  let network =
+    let doc = "Network to use." in
+    Arg.(value & opt Conv.network Blockexplorer_lwt.BTC & info ["n" ; "network"] ~doc)
 
   let json =
     let doc = "Output in JSON format." in
@@ -152,3 +95,15 @@ let getpass_confirm () =
   if String.compare passwd passwd_confirm <> 0 then None else Some (passwd)
 
 let getpass () = getpass "Enter passphrase: "
+
+let multisig_script tezos_pkh signers_pks =
+  let open Bitcoin in
+  let start_script =
+    Script.Element.[O (Op_pushdata (Cstruct.len tezos_pkh)) ; D tezos_pkh ; O Op_drop] in
+  let signers_pkh = List.map signers_pks ~f:begin fun pk ->
+      let cs = Cstruct.of_bigarray (Secp256k1.Public.to_bytes ctx pk) in
+      Script.Element.[O (Op_pushdata (Cstruct.len cs)) ; D cs]
+    end in
+  let end_script = Script.Element.[O Op_2 ; O Op_checkmultisig] in
+  let signers_pkh = Script.Element.O Op_2 :: (List.concat signers_pkh) in
+  start_script @ signers_pkh @ end_script
