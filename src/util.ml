@@ -3,8 +3,8 @@ open Secp256k1
 open Bitcoin.Wallet
 
 let ctx = Context.create []
-let pk1 = Public.of_bytes_exn ctx (Hex.to_cstruct (`Hex "04e8f164c9c12b039d3e522aa291e3544ddc99240a878080669aee1c359f66d253793af56acd2af002bf7038570913ed5092328ef2940ce3cedaa7c1801174e50e")).buffer
-let pk2 = Public.of_bytes_exn ctx (Hex.to_cstruct (`Hex "04c6ad7f526553affb3979483dac278b1517199a5ac3cd0fbb669644aadbf933bafb53bc3ef4687b32399e8fae8444800231bf84cd41442c24abfc58c05ba77a75")).buffer
+let pk1 = Public.read_exn ctx (Hex.to_cstruct (`Hex "04e8f164c9c12b039d3e522aa291e3544ddc99240a878080669aee1c359f66d253793af56acd2af002bf7038570913ed5092328ef2940ce3cedaa7c1801174e50e")).buffer
+let pk2 = Public.read_exn ctx (Hex.to_cstruct (`Hex "04c6ad7f526553affb3979483dac278b1517199a5ac3cd0fbb669644aadbf933bafb53bc3ef4687b32399e8fae8444800231bf84cd41442c24abfc58c05ba77a75")).buffer
 let fees_per_byte = 400
 let vendor_id = 0x2C97
 let product_id = 0x0001
