@@ -10,6 +10,8 @@ open Blockexplorer.Types
 open Util
 open Util.Cmdliner
 
+let c = Bitcoin.Util.c
+
 let tezos_input_size = 260 (* computed in the ocaml-libbitcoin testsuite *)
 
 module User = struct
@@ -34,7 +36,7 @@ let lookup_utxos loglevel network tezos_addrs =
   set_loglevel loglevel ;
   let tezos_addrs =
     if List.is_empty tezos_addrs then
-      List.map In_channel.(input_lines stdin) ~f:Base58.Tezos.of_string_exn else
+      List.map In_channel.(input_lines stdin) ~f:(Base58.Tezos.of_string_exn c) else
       tezos_addrs in
   let run () =
     Lwt_log.debug_f "Found %d tezos addresses" (List.length tezos_addrs) >>= fun () ->
@@ -44,15 +46,15 @@ let lookup_utxos loglevel network tezos_addrs =
         payment_address
       end in
     List.iter2_exn tezos_addrs payment_addrs ~f:begin fun ta pa ->
-      Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show ta) (Base58.Bitcoin.show pa)
+      Lwt_log.ign_debug_f "%s -> %s" (Base58.Tezos.show c ta) (Base58.Bitcoin.show c pa)
     end ;
-    Blockexplorer_lwt.utxos ~network payment_addrs >>= function
+    Blockexplorer_lwt.utxos c ~network payment_addrs >>= function
     | Error err ->
       Lwt_log.error (Http.string_of_error err)
     | Ok utxos ->
       Lwt_log.debug_f "Blockexplorer: found %d utxo(s)" (List.length utxos) >|= fun () ->
       ignore begin List.iter2 payment_addrs utxos ~f:begin fun a u ->
-          printf "%s\n" (Utxo.to_string u)
+          printf "%s\n" (Utxo.to_string c u)
         end
       end in
   Lwt_main.run (run ())
@@ -60,7 +62,7 @@ let lookup_utxos loglevel network tezos_addrs =
 let lookup_utxos =
   let doc = "Get Bitcoin UTXOs from a Tezos address." in
   let tezos_addrs =
-    Arg.(value & (pos_all Conv.tezos_addr []) & info [] ~docv:"TEZOS_ADDR") in
+    Arg.(value & (pos_all (Conv.tezos_addr c) []) & info [] ~docv:"TEZOS_ADDR") in
   Term.(const lookup_utxos $ loglevel $ network $ tezos_addrs),
   Term.info ~doc "lookup-utxos"
 
@@ -93,7 +95,7 @@ let spend_n network prev_txid prev_out path tezos_addrs =
     | Blockexplorer_lwt.BTC_testnet
     | BCH_testnet -> true
     | _ -> false in
-  let h = Hidapi.hid_open ~vendor_id:0x2C97 ~product_id:0x0001 in
+  let h = Hidapi.open_id_exn ~vendor_id:0x2C97 ~product_id:0x0001 in
   let dest_addrs = List.map tezos_addrs ~f:begin fun addr ->
       let { User.payment_address } = User.of_tezos_addr ~testnet addr in
       payment_address
@@ -155,7 +157,7 @@ let spend_n loglevel network prev_txid prev_out path tezos_addrs =
   let prev_txid = Hex.of_string prev_txid in
   let tezos_addrs = match tezos_addrs with
     | [] -> List.map Stdio.In_channel.(input_lines stdin)
-              ~f:Base58.Tezos.of_string_exn
+              ~f:(Base58.Tezos.of_string_exn c)
     | _ -> tezos_addrs in
   Lwt_main.run begin
     spend_n network prev_txid prev_out path tezos_addrs >|= function
@@ -171,7 +173,7 @@ let spend_n =
   let path =
     Arg.(required & (pos 2 (some Conv.path) None) & info [] ~docv:"PATH") in
   let tezos_addrs =
-    Arg.(value & (pos_right 2 Conv.tezos_addr []) & info [] ~docv:"TEZOS ADDRS") in
+    Arg.(value & (pos_right 2 (Conv.tezos_addr c) []) & info [] ~docv:"TEZOS ADDRS") in
   let doc = "Spend bitcoins equally between n addresses." in
   Term.(const spend_n $ loglevel $ network $ prev_txid $ prev_out $ path $ tezos_addrs),
   Term.info ~doc "spend-n"

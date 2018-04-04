@@ -1,10 +1,13 @@
 open Base
 open Stdio
 open Cmdliner
-open Sodium
+open Tweetnacl
+open Blake2
 
 open Util
 open Util.Cmdliner
+
+let c = Bitcoin.Util.c
 
 let tezos_pkh_size = 20
 
@@ -24,11 +27,13 @@ module Wallet = struct
     let open Json_encoding in
     conv
       (fun { mnemonic ; tezos_addr ; payment_addr } ->
-         Base58.(Bip39.to_words mnemonic, Tezos.to_string tezos_addr, Bitcoin.to_string payment_addr))
+         Base58.(Bip39.to_words mnemonic,
+                 Tezos.to_string c tezos_addr,
+                 Bitcoin.to_string c payment_addr))
       (fun (mnemonic, tezos_addr, payment_addr) ->
-         let mnemonic = Bip39.of_words mnemonic in
-         let tezos_addr = Base58.Tezos.of_string_exn tezos_addr in
-         let payment_addr = Base58.Bitcoin.of_string_exn payment_addr in
+         let mnemonic = Bip39.of_words_exn mnemonic in
+         let tezos_addr = Base58.Tezos.of_string_exn c tezos_addr in
+         let payment_addr = Base58.Bitcoin.of_string_exn c payment_addr in
          { mnemonic ; tezos_addr ; payment_addr })
       (obj3
          (req "mnemonic" (list string))
@@ -41,23 +46,18 @@ module Wallet = struct
     let open Caml.Format in
     fprintf ppf "%a@.%a@.%a"
       Bip39.pp mnemonic
-      Base58.Tezos.pp tezos_addr
-      Base58.Bitcoin.pp payment_addr
+      (Base58.Tezos.pp c) tezos_addr
+      (Base58.Bitcoin.pp c) payment_addr
 
   let show t =
     Caml.Format.asprintf "%a" pp t
 end
 
-let generate_seed ?(testnet=false) seed_bytes =
-  let seed = Sign.Bytes.to_seed seed_bytes in
-  let sk, pk = Sign.seed_keypair seed in
-  let pk_bytes = Sign.Bigbytes.of_public_key pk in
-  let h = Generichash.init ~size:tezos_pkh_size () in
-  Generichash.Bigbytes.update h pk_bytes ;
-  let pkh = Generichash.final h in
-  let pkh_cs = Generichash.Bigbytes.of_hash pkh |> Cstruct.of_bigarray in
-  let pkh_bytes = Cstruct.to_string pkh_cs in
-  let script = Util.multisig_script pkh_cs [pk1; pk2] in
+let generate_seed ?(testnet=false) seed =
+  let pk, sk = Sign.keypair ~seed () in
+  let Blake2b.Hash pkh = Blake2b.direct (Sign.to_cstruct pk) tezos_pkh_size in
+  let pkh_bytes = Cstruct.to_string pkh in
+  let script = Util.multisig_script pkh [pk1; pk2] in
   (* let cs = Cstruct.create 1024 in *)
   (* let cs' = Bitcoin.Script.to_cstruct cs script in *)
   (* let `Hex script_hex = Hex.of_cstruct (Cstruct.sub cs 0 cs'.off) in
@@ -69,11 +69,10 @@ let generate_seed ?(testnet=false) seed_bytes =
   Bitcoin.Wallet.Address.of_script ~testnet script
 
 let generate_one ?(testnet=false) passphrase =
-  let entropy = Random.Bigbytes.generate 20 in
-  let mnemonic = Bip39.of_entropy (Cstruct.of_bigarray entropy) in
-  let seed_bytes =
-    String.subo ~len:32 (Bip39.to_seed mnemonic ~passphrase) in
-  let tezos_addr, payment_addr = generate_seed ~testnet seed_bytes in
+  let entropy = Rand.gen 20 in
+  let mnemonic = Bip39.of_entropy entropy in
+  let seed = Bip39.to_seed mnemonic ~passphrase in
+  let tezos_addr, payment_addr = generate_seed ~testnet seed in
   Wallet.{ mnemonic ; tezos_addr ; payment_addr }
 
 let generate_n testnet passphrase n =
@@ -94,7 +93,6 @@ let generate ll testnet json_out only_addrs n =
       prerr_endline "Passphrase do not match. Aborting." ;
       Caml.exit 1
   | Some passphrase ->
-      Random.stir () ;
       let wallets = generate_n testnet passphrase n in
       match json_out, only_addrs with
       | true, _ ->
@@ -103,24 +101,24 @@ let generate ll testnet json_out only_addrs n =
       | _, true ->
         List.iter wallets
           ~f:(fun { tezos_addr } ->
-              printf "%s\n" (Base58.Tezos.show tezos_addr))
+              printf "%s\n" (Base58.Tezos.show c tezos_addr))
       | _ ->
         Caml.Format.(printf "%a@." (pp_print_list Wallet.pp) wallets)
 
 let check testnet wordsfile =
   let mnemonic = match wordsfile with
     | None ->
-      eprintf "Enter mnemonic: %!" ;
+      printf "Enter mnemonic: %!" ;
       In_channel.(input_line stdin)
     | Some fn -> List.hd (In_channel.read_lines fn) in
   let mnemonic = Option.map mnemonic ~f:(String.split ~on:' ') in
   match mnemonic with
   | Some words when List.length words = 15 -> begin
-      let mnemonic = Bip39.of_words words in
+      let mnemonic = Bip39.of_words_exn words in
+      printf "Enter wallet passphrase: %!" ;
       let passphrase = getpass () in
-      let seed_bytes = Bip39.to_seed ~passphrase mnemonic in
-      let tezos_addr, payment_addr =
-        generate_seed ~testnet (String.subo ~len:32 seed_bytes) in
+      let seed = Bip39.to_seed ~passphrase mnemonic in
+      let tezos_addr, payment_addr = generate_seed ~testnet seed in
       let wallet = { Wallet.mnemonic ; tezos_addr ; payment_addr } in
       printf "%s\n" Wallet.(show wallet)
     end
@@ -152,12 +150,12 @@ let payment_address testnet { Base58.Tezos.payload } =
    * | #loglevel -> ()
    * end ; *)
   let addr = Bitcoin.Wallet.Address.of_script ~testnet script in
-  Caml.Format.printf "%a@." Base58.Bitcoin.pp addr
+  Caml.Format.printf "%a@." (Base58.Bitcoin.pp c) addr
 
 let payment_address =
   let doc = "Get a payment address from a Tezos address." in
   let tezos_addr =
-    Arg.(required & (pos 0 (some Cmdliner.Conv.tezos_addr) None) & info [] ~docv:"TEZOS_ADDRESS") in
+    Arg.(required & (pos 0 (some (Cmdliner.Conv.tezos_addr c)) None) & info [] ~docv:"TEZOS_ADDRESS") in
   Term.(const payment_address $ testnet $ tezos_addr),
   Term.info ~doc "payment-address"
 

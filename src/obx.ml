@@ -7,6 +7,8 @@ open Util.Cmdliner
 
 open Bitcoin.Protocol
 
+let c = Bitcoin.Util.c
+
 let blk_decode loglevel blk =
   set_loglevel loglevel ;
   let blk = match blk with
@@ -94,10 +96,10 @@ let tx_fetch =
 let ec_to_wif loglevel uncompressed testnet secret =
   let open Bitcoin.Wallet in
   let secret =
-    Secp256k1.Secret.read_exn ctx secret.Cstruct.buffer in
+    Secp256k1.Key.read_sk_exn ctx secret.Cstruct.buffer in
   let compress = not uncompressed in
   let wif = WIF.create ~testnet ~compress secret in
-  Format.printf "%a@." WIF.pp wif
+  Format.printf "%a@." (WIF.pp ctx) wif
 
 let ec_to_wif =
   let doc = "Encode an secp256k1 private key to WIF format." in
@@ -113,11 +115,11 @@ let ec_to_public loglevel uncompressed secret =
   let open Bitcoin.Wallet in
   let compress = not uncompressed in
   let secret =
-    Secp256k1.Secret.read_exn ctx secret.Cstruct.buffer in
+    Secp256k1.Key.read_sk_exn ctx secret.Cstruct.buffer in
   let public =
-    Secp256k1.Public.of_secret ctx secret in
+    Secp256k1.Key.neuterize_exn ctx secret in
   let public_bytes =
-    Secp256k1.Public.to_bytes ~compress ctx public |> Cstruct.of_bigarray in
+    Secp256k1.Key.to_bytes ~compress ctx public |> Cstruct.of_bigarray in
   let `Hex ec_public_hex = Hex.of_cstruct public_bytes in
   Printf.printf "%s\n" ec_public_hex
 
@@ -132,9 +134,9 @@ let ec_to_public =
   Term.info ~doc "ec-to-public"
 
 let ec_to_address loglevel testnet pk =
-  let public = Secp256k1.Public.read_exn ctx pk.Cstruct.buffer in
+  let public = Secp256k1.Key.read_pk_exn ctx pk.Cstruct.buffer in
   let addr = Bitcoin.Wallet.Address.of_pubkey ~testnet ctx public in
-  Format.printf "%a@." Base58.Bitcoin.pp addr
+  Format.printf "%a@." (Base58.Bitcoin.pp c) addr
 
 let ec_to_address =
   let doc = "Convert an EC public key to a payment address." in
@@ -144,11 +146,11 @@ let ec_to_address =
   Term.info ~doc "ec-to-address"
 
 let ec_compress loglevel testnet pk =
-  let public = Secp256k1.Public.read_exn ctx pk.Cstruct.buffer in
+  let public = Secp256k1.Key.read_pk_exn ctx pk.Cstruct.buffer in
   let `Hex pk_hex =
-    Secp256k1.Public.to_bytes ctx public |> Cstruct.of_bigarray |> Hex.of_cstruct in
+    Secp256k1.Key.to_bytes ctx public |> Cstruct.of_bigarray |> Hex.of_cstruct in
   let addr = Bitcoin.Wallet.Address.of_pubkey ~testnet ctx public in
-  Format.printf "%s@.%a@." pk_hex Base58.Bitcoin.pp addr
+  Format.printf "%s@.%a@." pk_hex (Base58.Bitcoin.pp c) addr
 
 let ec_compress =
   let doc = "Convert an EC public key to a payment address." in
@@ -159,12 +161,12 @@ let ec_compress =
 
 let get_wallet_pubkey path =
   let open Ledgerwallet in
-  let h = Hidapi.hid_open ~vendor_id ~product_id in
+  let h = Hidapi.open_id_exn ~vendor_id ~product_id in
   let { Public_key.uncompressed } = get_wallet_public_key h path in
-  let pk = Secp256k1.Public.read_exn ctx uncompressed.Cstruct.buffer in
+  let pk = Secp256k1.Key.read_pk_exn ctx uncompressed.Cstruct.buffer in
   let addr = Bitcoin.Wallet.Address.of_pubkey ctx pk in
   let addr_testnet = Bitcoin.Wallet.Address.of_pubkey ~testnet:true ctx pk in
-  Base58.Bitcoin.(Format.printf "%a@.%a@." pp addr pp addr_testnet)
+  Base58.Bitcoin.(Format.printf "%a@.%a@." (pp c) addr (pp c) addr_testnet)
 
 let get_wallet_pubkey =
   let doc = "Get Ledger pubkey from a BIP44 path." in
