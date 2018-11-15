@@ -64,8 +64,13 @@ let tx_broadcast loglevel rawtx_bytes =
     | Some tx -> tx in
   let run () =
     broadcast_tx rawtx_bytes >>= function
-    | Ok (`Hex txid) -> Lwt_log.info txid
-    | Error err -> Lwt_log.error (Http.string_of_error err) in
+    | Ok (`Hex txid) ->
+      Lwt_log.info txid
+    | Error err ->
+      Lwt_log.error (Http.string_of_error err) >>= fun () ->
+      Lwt_main.yield () >|= fun () ->
+      exit 1
+  in
   Lwt_main.run (run ())
 
 let tx_broadcast =
@@ -79,7 +84,10 @@ let tx_fetch loglevel txid =
   set_loglevel loglevel ;
   let run () =
     rawtx (Hex.of_string txid) >>= function
-    | Error err -> Lwt_log.error (Http.string_of_error err)
+    | Error err ->
+      Lwt_log.error (Http.string_of_error err) >>= fun () ->
+      Lwt_main.yield () >|= fun () ->
+      exit 1
     | Ok t -> begin
         match Transaction.of_bytes t with
         | None -> Lwt_log.error "Unable to decode raw transaction"

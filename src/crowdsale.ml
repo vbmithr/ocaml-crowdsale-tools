@@ -31,7 +31,7 @@ let output_of_dest_addr addr ~value =
   let script = Payment_address.(of_b58check_exn addr |> to_script) in
   Transaction.Output.create ~script ~value
 
-let spend_n cfg privkey tezos_addrs amount =
+let spend_n cfg hashtype privkey tezos_addrs amount =
   let dest_addrs = List.map tezos_addrs ~f:begin fun addr ->
       let { User.payment_address } = User.of_tezos_addr ~cfg addr in
       payment_address
@@ -94,7 +94,7 @@ let spend_n cfg privkey tezos_addrs amount =
       List.mapi inputs_and_scripts ~f:begin fun index (_input, prev_out_script) ->
         let open Transaction.Sign in
         let endorsement =
-          Transaction.Sign.endorse_exn ~tx ~index ~prev_out_script ~secret () in
+          Transaction.Sign.endorse_exn ~hashtype ~tx ~index ~prev_out_script ~secret () in
         Script.P2PKH.scriptSig endorsement pubkey
       end in
     List.iter2_exn inputs scriptSigs ~f:begin fun i e ->
@@ -106,7 +106,7 @@ let spend_n cfg privkey tezos_addrs amount =
     printf "%s\n" tx_hex
   end
 
-let spend_n loglevel cfg privkey tezos_addrs amount =
+let spend_n loglevel cfg hashtype privkey tezos_addrs amount =
   let cfg = Cfg.unopt cfg in
   let amount =
     Option.map amount ~f:(fun a -> Int.of_float (Float.(a * 1e8))) in
@@ -116,12 +116,16 @@ let spend_n loglevel cfg privkey tezos_addrs amount =
               ~f:Base58.Tezos.of_string_exn
     | _ -> tezos_addrs in
   Lwt_main.run begin
-    spend_n cfg privkey tezos_addrs amount >|= function
+    spend_n cfg hashtype privkey tezos_addrs amount >|= function
     | Ok () -> ()
     | Error err -> Lwt_log.ign_error (Http.string_of_error err)
   end
 
 let spend_n =
+  let hashtype =
+    let open Transaction.Sign in
+    let doc = "Create the transaction for Bitcoin Cash (BCH)." in
+    Arg.(value & vflag [ All ] [[ All ; ForkId ], info [ "bch" ] ~doc ]) in
   let amount =
     let doc = "Total amount to spend." in
     Arg.(value & opt (some float) None & info ["a" ; "amount"] ~doc) in
@@ -130,7 +134,7 @@ let spend_n =
   let tezos_addrs =
     Arg.(value & (pos_right 1 Conv.tezos_addr []) & info [] ~docv:"DEST") in
   let doc = "Spend bitcoins equally between n addresses." in
-  Term.(const spend_n $ loglevel $ cfg $ privkey $ tezos_addrs $ amount),
+  Term.(const spend_n $ loglevel $ cfg $ hashtype $ privkey $ tezos_addrs $ amount),
   Term.info ~doc "spend-n"
 
 type tezos_addr_inputs = {
